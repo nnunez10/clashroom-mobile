@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "ClashRoom",
+    "slug": "clashroom-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "scheme": "clashroom",
+    "icon": "./assets/images/icon.png",
+    "splash": {
+      "image": "./assets/images/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#000000"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.noe.clashroom",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png"
+      }
+    },
+    "plugins": [],
+    "extra": {
+      "eas": {
+        "projectId": "0045f94b-6679-4195-87b3-abfbf6d3f45a"
+      }
+    }
+  }
+}
