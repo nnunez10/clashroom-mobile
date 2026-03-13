@@ -11,6 +11,20 @@ import {
   UIManager,
   View
 } from "react-native";
+import {
+  buildClaimFamilyViews,
+  getFamilyStatusLabel,
+  getFamilySummaryLine,
+  getLatestFamilyEvent,
+  type ClaimFamilyStatus,
+  type ClaimFamilyView,
+} from "@/lib/claim/claimFamily";
+import { type EvidenceRecord, type Stance } from "@/lib/claim/types";
+import { formatEvidenceDate, formatVerificationAge } from "@/lib/clashbot/verificationService";
+import {
+  getStatusPresentation,
+  type StatusStyleKey,
+} from "@/lib/clashbot/statusPresentation";
 
 if (
   Platform.OS === "android" &&
@@ -41,7 +55,7 @@ type VerificationResult = {
   matches?: FactCheckMatch[];
   top?: FactCheckMatch;
   message?: string;
-  stance?: "supported" | "contradicted" | "unclear";
+  stance?: Stance;
   relevance?: {
     relevant: boolean;
     reason: string;
@@ -52,25 +66,6 @@ type ClaimTimeline = {
   queuedAt?: number;
   checkingAt?: number;
   completedAt?: number;
-};
-
-type EvidenceRecord = {
-  id?: string;
-  provider?: string;
-  kind?: "fact_check" | "coverage" | "override" | "unknown";
-  url?: string;
-  publisher?: string;
-  title?: string;
-  claim?: string;
-  claimReviewed?: string;
-  claimDate?: string;
-  snippet?: string;
-  ratingText?: string;
-  ratingRaw?: string;
-  capturedAt?: number;
-  supports?: boolean;
-  contradicts?: boolean;
-  stance?: "supported" | "contradicted" | "unclear";
 };
 
 type ClaimEvent = {
@@ -103,29 +98,6 @@ type ClaimItem = {
   };
 };
 
-type ClaimFamilyStatus =
-  | "checking"
-  | "matched"
-  | "disputed"
-  | "mixed"
-  | "no_match"
-  | "error"
-  | "queued";
-
-type ClaimFamilyView = {
-  familyId: string;
-  leadClaimId: string;
-  leadClaim: ClaimItem;
-  claims: ClaimItem[];
-  totalClaims: number;
-  familyStatus: ClaimFamilyStatus;
-  canonicalText: string;
-  allEvidence: EvidenceRecord[];
-  allEvents: ClaimEvent[];
-  rootClaims: ClaimItem[];
-  derivedClaims: ClaimItem[];
-};
-
 type ClashBotSheetProps = {
   isOpen: boolean;
   onClose: () => void;
@@ -136,40 +108,18 @@ type ClashBotSheetProps = {
   initialDraft?: string;
 };
 
-function getStatusLabel(status?: ClaimItem["status"]) {
-  switch (status) {
-    case "checking":
-      return "Checking";
-    case "matched":
-      return "Matched";
-    case "disputed":
-      return "Disputed";
-    case "no_match":
-      return "No Match";
-    case "error":
-      return "Error";
-    case "queued":
-      return "Queued";
-    default:
-      return "Unknown";
-  }
-}
-
-function getStatusStyle(status?: ClaimItem["status"]) {
-  switch (status) {
-    case "matched":
-      return styles.statusMatched;
-    case "disputed":
-      return styles.statusDisputed;
-    case "checking":
-      return styles.statusChecking;
-    case "no_match":
-      return styles.statusNoMatch;
-    case "error":
-      return styles.statusError;
-    default:
-      return styles.statusQueued;
-  }
+function getStatusBadge(status?: ClaimItem["status"], stance?: Stance) {
+  const { label, styleKey } = getStatusPresentation(status, stance);
+  const styleMap: Record<StatusStyleKey, object> = {
+    statusMatched:     styles.statusMatched,
+    statusDisputed:    styles.statusDisputed,
+    statusUnconfirmed: styles.statusUnconfirmed,
+    statusChecking:    styles.statusChecking,
+    statusNoMatch:     styles.statusNoMatch,
+    statusError:       styles.statusError,
+    statusQueued:      styles.statusQueued,
+  };
+  return { label, style: styleMap[styleKey] };
 }
 
 function getSourceTypeLabel(verification?: VerificationResult | any) {
@@ -205,7 +155,7 @@ function getVerdictLabel(claim: ClaimItem) {
   if (stance === "contradicted") return "Contradicted";
   if (stance === "supported") return "Supported";
 
-  if (claim.status === "disputed") return "Disputed";
+  if (claim.status === "disputed") return "Weak Match";
 
   if (normalized.includes("mostly false")) return "Mostly False";
   if (normalized.includes("false")) return "False";
@@ -217,6 +167,7 @@ function getVerdictLabel(claim: ClaimItem) {
   if (normalized.includes("contradicted")) return "Contradicted";
   if (normalized.includes("supported")) return "Supported";
 
+  if (claim.status === "matched" && stance === "unclear") return "Unconfirmed";
   if (claim.status === "matched") return "Matched";
 
   return "Unknown";
@@ -247,19 +198,22 @@ function getEvidenceSummary(verification?: VerificationResult | any) {
       : "Source Scan";
 
   if (totalMatches > 1) {
-    return `${providerLabel} found ${totalMatches} related sources.`;
+    return `${providerLabel} found ${totalMatches} sources — showing top match.`;
   }
 
   if (totalMatches === 1) {
-    return `${providerLabel} found 1 related source.`;
+    const weakRelevance = verification?.relevance?.relevant === false;
+    return weakRelevance
+      ? `${providerLabel} found 1 source — low relevance.`
+      : `${providerLabel} found 1 source.`;
   }
 
   if (verification?.status === "no_match") {
-    return "No direct matching source found yet.";
+    return "No matching source found.";
   }
 
   if (verification?.status === "error") {
-    return "Verification hit an error before evidence could be loaded.";
+    return "Verification failed — no sources loaded.";
   }
 
   return null;
@@ -276,7 +230,6 @@ function getVerdictTone(claim: ClaimItem) {
     case "False":
     case "Mostly False":
     case "Misleading":
-    case "Disputed":
     case "Contradicted":
       return styles.verdictNegative;
     default:
@@ -295,7 +248,6 @@ function getVerdictTextTone(claim: ClaimItem) {
     case "False":
     case "Mostly False":
     case "Misleading":
-    case "Disputed":
     case "Contradicted":
       return styles.verdictBadgeTextNegative;
     default:
@@ -387,10 +339,9 @@ function getClaimMetaLine(claim: ClaimItem) {
       claim.status === "disputed" ||
       claim.status === "no_match" ||
       claim.status === "error") &&
-    completedAt &&
-    queuedAt
+    completedAt
   ) {
-    return `Resolved in ${formatRelativeMs(completedAt - queuedAt)}`;
+    return formatVerificationAge(completedAt);
   }
 
   return null;
@@ -423,187 +374,6 @@ function getClaimCreatedTime(claim: ClaimItem) {
   );
 }
 
-function sortClaimsForFamily(a: ClaimItem, b: ClaimItem) {
-  const aRoot = !a.derivedFromClaimId;
-  const bRoot = !b.derivedFromClaimId;
-
-  if (aRoot && !bRoot) return -1;
-  if (!aRoot && bRoot) return 1;
-
-  return getClaimCreatedTime(a) - getClaimCreatedTime(b);
-}
-
-function pickLeadClaim(claims: ClaimItem[]) {
-  const rootClaims = claims.filter((claim) => !claim.derivedFromClaimId).sort(sortClaimsForFamily);
-
-  if (rootClaims.length > 0) return rootClaims[0];
-
-  return [...claims].sort(sortClaimsForFamily)[0];
-}
-
-function evidenceKey(evidence: EvidenceRecord) {
-  return [
-    evidence.url ?? "",
-    evidence.title ?? "",
-    evidence.publisher ?? "",
-    evidence.kind ?? "",
-    evidence.ratingText ?? "",
-    evidence.ratingRaw ?? "",
-  ].join("|");
-}
-
-function dedupeEvidence(items: EvidenceRecord[]) {
-  const map = new Map<string, EvidenceRecord>();
-
-  for (const item of items) {
-    const key = evidenceKey(item);
-    if (!map.has(key)) {
-      map.set(key, item);
-    }
-  }
-
-  return Array.from(map.values());
-}
-
-function eventKey(event: ClaimEvent) {
-  return [
-    event.type ?? "",
-    event.at ?? "",
-    event.message ?? "",
-    JSON.stringify(event.meta ?? {}),
-  ].join("|");
-}
-
-function dedupeEvents(events: ClaimEvent[]) {
-  const map = new Map<string, ClaimEvent>();
-
-  for (const event of events) {
-    const key = eventKey(event);
-    if (!map.has(key)) {
-      map.set(key, event);
-    }
-  }
-
-  return Array.from(map.values());
-}
-
-function getFamilyStatus(claims: ClaimItem[]): ClaimFamilyStatus {
-  const statuses = claims.map((claim) => claim.status ?? "queued");
-
-  if (statuses.some((status) => status === "checking")) return "checking";
-
-  const hasMatched = statuses.some((status) => status === "matched");
-  const hasDisputed = statuses.some((status) => status === "disputed");
-
-  if (hasMatched && hasDisputed) return "mixed";
-  if (hasDisputed) return "disputed";
-  if (hasMatched) return "matched";
-  if (statuses.some((status) => status === "error")) return "error";
-  if (statuses.some((status) => status === "no_match")) return "no_match";
-
-  return "queued";
-}
-
-function familyPriority(status: ClaimFamilyStatus) {
-  switch (status) {
-    case "checking":
-      return 1;
-    case "disputed":
-      return 2;
-    case "mixed":
-      return 3;
-    case "matched":
-      return 4;
-    case "no_match":
-      return 5;
-    case "error":
-      return 6;
-    case "queued":
-    default:
-      return 7;
-  }
-}
-
-function sortFamiliesForDisplay(a: ClaimFamilyView, b: ClaimFamilyView) {
-  const priorityDiff = familyPriority(a.familyStatus) - familyPriority(b.familyStatus);
-
-  if (priorityDiff !== 0) return priorityDiff;
-
-  return getClaimCreatedTime(a.leadClaim) - getClaimCreatedTime(b.leadClaim);
-}
-
-function buildClaimFamilyViews(claims: ClaimItem[]): ClaimFamilyView[] {
-  const familyMap = new Map<string, ClaimItem[]>();
-
-  for (const claim of claims) {
-    const familyKey =
-      claim.familyId ||
-      claim.claimDna?.familyId ||
-      claim.claimDna?.familyFingerprint ||
-      claim.id;
-
-    const bucket = familyMap.get(familyKey);
-
-    if (bucket) {
-      bucket.push(claim);
-    } else {
-      familyMap.set(familyKey, [claim]);
-    }
-  }
-
-  const families = Array.from(familyMap.entries()).map(([familyId, members]) => {
-    const sortedMembers = [...members].sort(sortClaimsForFamily);
-    const leadClaim = pickLeadClaim(sortedMembers);
-
-    const allEvidence = dedupeEvidence(
-      sortedMembers.flatMap((claim) => claim.evidence ?? [])
-    );
-
-    const allEvents = dedupeEvents(
-      sortedMembers.flatMap((claim) => claim.events ?? [])
-    ).sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
-
-    const rootClaims = sortedMembers.filter((claim) => !claim.derivedFromClaimId);
-    const derivedClaims = sortedMembers.filter((claim) => !!claim.derivedFromClaimId);
-
-    return {
-      familyId,
-      leadClaimId: leadClaim.id,
-      leadClaim,
-      claims: sortedMembers,
-      totalClaims: sortedMembers.length,
-      familyStatus: getFamilyStatus(sortedMembers),
-      canonicalText: leadClaim.text,
-      allEvidence,
-      allEvents,
-      rootClaims,
-      derivedClaims,
-    };
-  });
-
-  return families.sort(sortFamiliesForDisplay);
-}
-
-function getFamilyStatusLabel(status: ClaimFamilyStatus) {
-  switch (status) {
-    case "checking":
-      return "Checking";
-    case "matched":
-      return "Matched";
-    case "disputed":
-      return "Disputed";
-    case "mixed":
-      return "Mixed";
-    case "no_match":
-      return "No Match";
-    case "error":
-      return "Error";
-    case "queued":
-    default:
-      return "Queued";
-  }
-}
-
 function getFamilyStatusStyle(status: ClaimFamilyStatus) {
   switch (status) {
     case "matched":
@@ -621,29 +391,6 @@ function getFamilyStatusStyle(status: ClaimFamilyStatus) {
     default:
       return styles.statusQueued;
   }
-}
-
-function getFamilySummaryLine(family: ClaimFamilyView) {
-  const claimsText =
-    family.totalClaims === 1 ? "1 claim" : `${family.totalClaims} related claims`;
-
-  const sourcesText =
-    family.allEvidence.length === 1 ? "1 source" : `${family.allEvidence.length} sources`;
-
-  const rootText =
-    family.rootClaims.length === 1 ? "1 root" : `${family.rootClaims.length} roots`;
-
-  const derivedText =
-    family.derivedClaims.length === 1
-      ? "1 derived"
-      : `${family.derivedClaims.length} derived`;
-
-  return `${claimsText} • ${sourcesText} • ${rootText} • ${derivedText}`;
-}
-
-function getLatestFamilyEvent(family: ClaimFamilyView) {
-  if (!Array.isArray(family.allEvents) || family.allEvents.length === 0) return null;
-  return family.allEvents[family.allEvents.length - 1];
 }
 
 async function openLink(url?: string) {
@@ -671,11 +418,12 @@ function QuickVerifyStatus({ claims }: { claims: ClaimItem[] }) {
   }
 
   const isActive = latest.status === "checking" || latest.status === "queued";
+  const statusBadge = getStatusBadge(latest.status, latest.verification?.stance);
 
   return (
     <View style={styles.quickStatusCard}>
-      <View style={[styles.statusBadge, getStatusStyle(latest.status)]}>
-        <Text style={styles.statusBadgeText}>{getStatusLabel(latest.status)}</Text>
+      <View style={[styles.statusBadge, statusBadge.style]}>
+        <Text style={styles.statusBadgeText}>{statusBadge.label}</Text>
       </View>
       <Text style={styles.quickStatusClaimText} numberOfLines={2}>
         {latest.text}
@@ -751,6 +499,7 @@ export default function ClashBotSheet({
     const message = verification?.message;
     const sourceType = getSourceTypeLabel(verification);
     const evidenceSummary = getEvidenceSummary(verification);
+    const evidenceDate = formatEvidenceDate(topMatch?.claimDate, verification?.mode);
     const timeline = getTimelineStepState(claim);
     const metaLine = getClaimMetaLine(claim);
     const evidenceCount = Array.isArray(claim.evidence) ? claim.evidence.length : 0;
@@ -765,6 +514,10 @@ export default function ClashBotSheet({
     const meaningfulTokensCount = Array.isArray(claim.claimDna?.meaningfulTokens)
       ? claim.claimDna?.meaningfulTokens.length
       : 0;
+    const additionalSourceCount = Array.isArray(verification?.matches)
+      ? Math.min(verification.matches.length - 1, 3)
+      : 0;
+    const statusBadge = getStatusBadge(claim.status, claim.verification?.stance);
 
     return (
       <View
@@ -775,8 +528,8 @@ export default function ClashBotSheet({
         ]}
       >
         <View style={styles.claimTopRow}>
-          <View style={[styles.statusBadge, getStatusStyle(claim.status)]}>
-            <Text style={styles.statusBadgeText}>{getStatusLabel(claim.status)}</Text>
+          <View style={[styles.statusBadge, statusBadge.style]}>
+            <Text style={styles.statusBadgeText}>{statusBadge.label}</Text>
           </View>
 
           {topMatch?.url ? (
@@ -958,9 +711,9 @@ export default function ClashBotSheet({
                 <Text style={styles.sourceTypeBadgeText}>{sourceType}</Text>
               </View>
 
-              {!!topMatch?.publisher && (
+              {(!!topMatch?.publisher || !!evidenceDate) && (
                 <Text style={styles.publisherText} numberOfLines={1}>
-                  {topMatch.publisher}
+                  {[topMatch?.publisher, evidenceDate].filter(Boolean).join(" · ")}
                 </Text>
               )}
             </View>
@@ -978,9 +731,12 @@ export default function ClashBotSheet({
             )}
 
             {!!topMatch?.title && (
-              <Text style={styles.sourceTitleText} numberOfLines={2}>
-                {topMatch.title}
-              </Text>
+              <>
+                <Text style={styles.primarySourceLabel}>Primary source</Text>
+                <Text style={styles.sourceTitleText} numberOfLines={2}>
+                  {topMatch.title}
+                </Text>
+              </>
             )}
 
             {!!topMatch?.rating?.text && (
@@ -995,15 +751,19 @@ export default function ClashBotSheet({
 
             {!!topMatch?.url && (
               <Pressable onPress={() => openLink(topMatch.url)}>
-                <Text style={styles.linkText} numberOfLines={1}>
-                  {topMatch.url}
+                <Text style={styles.linkText}>
+                  {topMatch.publisher
+                    ? `Open ${topMatch.publisher} →`
+                    : "Open source →"}
                 </Text>
               </Pressable>
             )}
 
             {Array.isArray(verification?.matches) && verification.matches.length > 1 && (
               <View style={styles.sourcesBlock}>
-                <Text style={styles.sourcesTitle}>More sources</Text>
+                <Text style={styles.sourcesTitle}>
+                  {additionalSourceCount === 1 ? "1 more source" : `${additionalSourceCount} more sources`}
+                </Text>
 
                 {verification.matches
                   .slice(1, 4)
@@ -1046,7 +806,9 @@ export default function ClashBotSheet({
                       )}
 
                       {!!m.url && (
-                        <Text style={styles.sourceItemTap}>Tap to open source</Text>
+                        <Text style={styles.sourceItemTap}>
+                          {m.publisher ? `Open ${m.publisher} →` : "Open source →"}
+                        </Text>
                       )}
                     </Pressable>
                   ))}
@@ -1063,7 +825,7 @@ export default function ClashBotSheet({
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
       <View style={styles.backdrop}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+        <Pressable style={{ flex: 1 }} onPress={onClose} />
 
         <View
           style={[
@@ -1521,6 +1283,10 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(148, 163, 184, 0.22)",
   },
 
+  statusUnconfirmed: {
+    backgroundColor: "rgba(139, 92, 246, 0.14)",
+  },
+
   statusError: {
     backgroundColor: "rgba(248, 113, 113, 0.18)",
   },
@@ -1813,6 +1579,14 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
 
+  primarySourceLabel: {
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 0.8,
+    color: "#22d3ee",
+    textTransform: "uppercase",
+    marginBottom: 4,
+  },
   sourceTitleText: {
     fontSize: 15,
     lineHeight: 22,
