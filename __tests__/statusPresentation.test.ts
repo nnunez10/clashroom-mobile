@@ -129,6 +129,38 @@ describe("getStatusPresentation", () => {
     });
   });
 
+  // ── reasonCode pass-through ───────────────────────────────────────────────
+  describe("reasonCode is threaded through unchanged", () => {
+    it("reasonCode is included in result when provided", () => {
+      expect(getStatusPresentation("matched", "supported", "authoritative_support")).toEqual({
+        label: "Matched",
+        styleKey: "statusMatched",
+        reasonCode: "authoritative_support",
+      });
+    });
+
+    it("reasonCode is undefined when omitted", () => {
+      const result = getStatusPresentation("matched", "supported");
+      expect(result.reasonCode).toBeUndefined();
+    });
+
+    it("reasonCode does not alter label or styleKey (mixed_evidence + unclear still Unconfirmed)", () => {
+      expect(getStatusPresentation("matched", "unclear", "mixed_evidence")).toEqual({
+        label: "Unconfirmed",
+        styleKey: "statusUnconfirmed",
+        reasonCode: "mixed_evidence",
+      });
+    });
+
+    it("reasonCode does not alter fail-closed Contradicted", () => {
+      expect(getStatusPresentation("matched", "contradicted", "authoritative_contradiction")).toEqual({
+        label: "Contradicted",
+        styleKey: "statusDisputed",
+        reasonCode: "authoritative_contradiction",
+      });
+    });
+  });
+
   // ── defensive: undefined / unknown inputs ────────────────────────────────
   describe("defensive: undefined/unknown status", () => {
     it("undefined status → Unknown / statusQueued", () => {

@@ -19,7 +19,7 @@ import {
   type ClaimFamilyStatus,
   type ClaimFamilyView,
 } from "@/lib/claim/claimFamily";
-import { type EvidenceRecord, type Stance } from "@/lib/claim/types";
+import { type EvidenceRecord, type ReasonCode, type Stance } from "@/lib/claim/types";
 import { formatEvidenceDate, formatVerificationAge } from "@/lib/clashbot/verificationService";
 import {
   getStatusPresentation,
@@ -56,6 +56,7 @@ type VerificationResult = {
   top?: FactCheckMatch;
   message?: string;
   stance?: Stance;
+  reasonCode?: ReasonCode;
   relevance?: {
     relevant: boolean;
     reason: string;
@@ -108,8 +109,8 @@ type ClashBotSheetProps = {
   initialDraft?: string;
 };
 
-function getStatusBadge(status?: ClaimItem["status"], stance?: Stance) {
-  const { label, styleKey } = getStatusPresentation(status, stance);
+function getStatusBadge(status?: ClaimItem["status"], stance?: Stance, reasonCode?: ReasonCode) {
+  const { label, styleKey, reasonCode: code } = getStatusPresentation(status, stance, reasonCode);
   const styleMap: Record<StatusStyleKey, object> = {
     statusMatched:     styles.statusMatched,
     statusDisputed:    styles.statusDisputed,
@@ -119,7 +120,7 @@ function getStatusBadge(status?: ClaimItem["status"], stance?: Stance) {
     statusError:       styles.statusError,
     statusQueued:      styles.statusQueued,
   };
-  return { label, style: styleMap[styleKey] };
+  return { label, style: styleMap[styleKey], reasonCode: code };
 }
 
 function getSourceTypeLabel(verification?: VerificationResult | any) {
@@ -418,7 +419,7 @@ function QuickVerifyStatus({ claims }: { claims: ClaimItem[] }) {
   }
 
   const isActive = latest.status === "checking" || latest.status === "queued";
-  const statusBadge = getStatusBadge(latest.status, latest.verification?.stance);
+  const statusBadge = getStatusBadge(latest.status, latest.verification?.stance, latest.verification?.reasonCode);
 
   return (
     <View style={styles.quickStatusCard}>
@@ -517,7 +518,7 @@ export default function ClashBotSheet({
     const additionalSourceCount = Array.isArray(verification?.matches)
       ? Math.min(verification.matches.length - 1, 3)
       : 0;
-    const statusBadge = getStatusBadge(claim.status, claim.verification?.stance);
+    const statusBadge = getStatusBadge(claim.status, claim.verification?.stance, claim.verification?.reasonCode);
 
     return (
       <View
