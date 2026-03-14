@@ -408,6 +408,56 @@ async function openLink(url?: string) {
   }
 }
 
+function VerificationTracePanel({ claim }: { claim: ClaimItem }) {
+  const [open, setOpen] = useState(false);
+  const v = claim.verification;
+  const topMatch = v?.top || v?.matches?.[0];
+  const provider = topMatch?.provider || "—";
+  const evidenceAge = formatEvidenceDate(topMatch?.claimDate, v?.mode) ?? "—";
+
+  return (
+    <View style={styles.debugCard}>
+      <Pressable style={styles.debugHeaderRow} onPress={() => setOpen((o) => !o)}>
+        <Text style={styles.debugTitle}>Verification Trace</Text>
+        <View style={styles.debugPill}>
+          <Text style={styles.debugPillText}>{open ? "Hide" : "Show"}</Text>
+        </View>
+      </Pressable>
+
+      {open && (
+        <>
+          <Text style={styles.debugLine} numberOfLines={3}>
+            <Text style={styles.debugLineLabel}>Claim: </Text>{claim.text}
+          </Text>
+          <Text style={styles.debugLine}>
+            <Text style={styles.debugLineLabel}>Provider: </Text>{provider}
+          </Text>
+          <Text style={styles.debugLine}>
+            <Text style={styles.debugLineLabel}>Stance: </Text>{v?.stance ?? "—"}
+          </Text>
+          <Text style={styles.debugLine}>
+            <Text style={styles.debugLineLabel}>Reason: </Text>{v?.reasonCode ?? "—"}
+          </Text>
+          <Text style={styles.debugLine} numberOfLines={2}>
+            <Text style={styles.debugLineLabel}>Evidence: </Text>{topMatch?.title ?? "—"}
+          </Text>
+          <Text style={styles.debugLine}>
+            <Text style={styles.debugLineLabel}>Source: </Text>{topMatch?.publisher ?? "—"}
+          </Text>
+          <Text style={styles.debugLine}>
+            <Text style={styles.debugLineLabel}>Age: </Text>{evidenceAge}
+          </Text>
+          {!!v?.message && (
+            <Text style={styles.debugLine} numberOfLines={3}>
+              <Text style={styles.debugLineLabel}>Message: </Text>{v.message}
+            </Text>
+          )}
+        </>
+      )}
+    </View>
+  );
+}
+
 function QuickVerifyStatus({ claims }: { claims: ClaimItem[] }) {
   const latest = claims[0] ?? null;
 
@@ -710,6 +760,8 @@ export default function ClashBotSheet({
             </Text>
           )}
         </View>
+
+        {__DEV__ && <VerificationTracePanel claim={claim} />}
 
         {!!verification && (
           <>
