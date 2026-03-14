@@ -19,6 +19,22 @@ export type StatusPresentation = {
 };
 
 /**
+ * Returns a one-line explanatory string for ambiguous or failed badge states
+ * (Unconfirmed, No Match, Error). Returns null for clear verdicts
+ * (authoritative/coverage contradiction or support) — those need no gloss.
+ */
+export function getReasonCodeHelperText(reasonCode?: ReasonCode): string | null {
+  switch (reasonCode) {
+    case "mixed_evidence":        return "Sources disagree — verdict unclear.";
+    case "insufficient_evidence": return "Source found, but signals too weak to confirm.";
+    case "source_not_relevant":   return "Match found, but it doesn't align with this claim.";
+    case "no_reliable_match":     return "No matching source found.";
+    case "provider_error":        return "Verification check failed.";
+    default:                      return null;
+  }
+}
+
+/**
  * Maps (status, stance, reasonCode?) → { label, styleKey, reasonCode }.
  *
  * Stance outranks status for matched/disputed terminal states:

@@ -22,6 +22,7 @@ import {
 import { type EvidenceRecord, type ReasonCode, type Stance } from "@/lib/claim/types";
 import { formatEvidenceDate, formatVerificationAge } from "@/lib/clashbot/verificationService";
 import {
+  getReasonCodeHelperText,
   getStatusPresentation,
   type StatusStyleKey,
 } from "@/lib/clashbot/statusPresentation";
@@ -420,12 +421,14 @@ function QuickVerifyStatus({ claims }: { claims: ClaimItem[] }) {
 
   const isActive = latest.status === "checking" || latest.status === "queued";
   const statusBadge = getStatusBadge(latest.status, latest.verification?.stance, latest.verification?.reasonCode);
+  const helperText = getReasonCodeHelperText(statusBadge.reasonCode);
 
   return (
     <View style={styles.quickStatusCard}>
       <View style={[styles.statusBadge, statusBadge.style]}>
         <Text style={styles.statusBadgeText}>{statusBadge.label}</Text>
       </View>
+      {!!helperText && <Text style={styles.badgeHelperText}>{helperText}</Text>}
       <Text style={styles.quickStatusClaimText} numberOfLines={2}>
         {latest.text}
       </Text>
@@ -519,6 +522,7 @@ export default function ClashBotSheet({
       ? Math.min(verification.matches.length - 1, 3)
       : 0;
     const statusBadge = getStatusBadge(claim.status, claim.verification?.stance, claim.verification?.reasonCode);
+    const helperText = getReasonCodeHelperText(statusBadge.reasonCode);
 
     return (
       <View
@@ -539,6 +543,8 @@ export default function ClashBotSheet({
             </Pressable>
           ) : null}
         </View>
+
+        {!!helperText && <Text style={styles.badgeHelperText}>{helperText}</Text>}
 
         <Text style={styles.claimText}>{claim.text}</Text>
 
@@ -1294,6 +1300,14 @@ const styles = StyleSheet.create({
 
   statusQueued: {
     backgroundColor: "rgba(148, 163, 184, 0.18)",
+  },
+
+  badgeHelperText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "rgba(15, 23, 42, 0.52)",
+    marginTop: 4,
+    marginBottom: 2,
   },
 
   receiptsButton: {

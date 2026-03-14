@@ -10,7 +10,7 @@
  * Wire with jest + @types/jest + jest-expo when ready.
  * The module has zero React Native imports so it runs in plain Node/Jest.
  */
-import { getStatusPresentation } from "@/lib/clashbot/statusPresentation";
+import { getReasonCodeHelperText, getStatusPresentation } from "@/lib/clashbot/statusPresentation";
 
 describe("getStatusPresentation", () => {
   // ── fail-closed: contradicted stance outranks positive status ────────────
@@ -191,5 +191,60 @@ describe("getStatusPresentation", () => {
         styleKey: "statusQueued",
       });
     });
+  });
+});
+
+describe("getReasonCodeHelperText", () => {
+  // ── ambiguous states: returns explanatory copy ────────────────────────────
+  it("mixed_evidence → sources disagree copy", () => {
+    expect(getReasonCodeHelperText("mixed_evidence")).toBe(
+      "Sources disagree — verdict unclear."
+    );
+  });
+
+  it("insufficient_evidence → too weak to confirm copy", () => {
+    expect(getReasonCodeHelperText("insufficient_evidence")).toBe(
+      "Source found, but signals too weak to confirm."
+    );
+  });
+
+  it("source_not_relevant → doesn't align copy", () => {
+    expect(getReasonCodeHelperText("source_not_relevant")).toBe(
+      "Match found, but it doesn't align with this claim."
+    );
+  });
+
+  it("no_reliable_match → no source found copy", () => {
+    expect(getReasonCodeHelperText("no_reliable_match")).toBe(
+      "No matching source found."
+    );
+  });
+
+  it("provider_error → check failed copy", () => {
+    expect(getReasonCodeHelperText("provider_error")).toBe(
+      "Verification check failed."
+    );
+  });
+
+  // ── clear verdicts: returns null (no gloss needed) ────────────────────────
+  it("authoritative_contradiction → null", () => {
+    expect(getReasonCodeHelperText("authoritative_contradiction")).toBeNull();
+  });
+
+  it("authoritative_support → null", () => {
+    expect(getReasonCodeHelperText("authoritative_support")).toBeNull();
+  });
+
+  it("coverage_contradiction → null", () => {
+    expect(getReasonCodeHelperText("coverage_contradiction")).toBeNull();
+  });
+
+  it("coverage_support → null", () => {
+    expect(getReasonCodeHelperText("coverage_support")).toBeNull();
+  });
+
+  // ── defensive ─────────────────────────────────────────────────────────────
+  it("undefined → null", () => {
+    expect(getReasonCodeHelperText(undefined)).toBeNull();
   });
 });
