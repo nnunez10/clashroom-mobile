@@ -20,6 +20,7 @@ import {
   type ClaimFamilyView,
 } from "@/lib/claim/claimFamily";
 import { type ConfidenceTier, type EvidenceRecord, type ReasonCode, type Stance } from "@/lib/claim/types";
+import { clusterEvidence } from "@/lib/clashbot/evidenceClustering";
 import { formatEvidenceDate, formatVerificationAge } from "@/lib/clashbot/verificationService";
 import {
   getReasonCodeHelperText,
@@ -444,6 +445,16 @@ function VerificationTracePanel({ claim }: { claim: ClaimItem }) {
             <Text style={styles.debugLineLabel}>Confidence: </Text>
             {v?.confidenceTier ?? "—"}{v?.confidenceScore != null ? ` (${v.confidenceScore})` : ""}
           </Text>
+          {(() => {
+            const { representativeCount, totalMatches, duplicateCount } = clusterEvidence(v?.matches);
+            return (
+              <Text style={styles.debugLine}>
+                <Text style={styles.debugLineLabel}>Clusters: </Text>
+                {representativeCount} unique / {totalMatches} raw
+                {duplicateCount > 0 ? ` (${duplicateCount} merged)` : ""}
+              </Text>
+            );
+          })()}
           <Text style={styles.debugLine} numberOfLines={2}>
             <Text style={styles.debugLineLabel}>Evidence: </Text>{topMatch?.title ?? "—"}
           </Text>

@@ -12,6 +12,7 @@
 import type { FactCheckMatch } from "./types";
 import { findKnownFactOverride } from "./knownFacts";
 import type { ConfidenceTier, EvidenceRecord, ReasonCode, RelevanceAssessment, Stance } from "../claim/types";
+import { clusterEvidence } from "./evidenceClustering";
 
 export type { ConfidenceTier, EvidenceRecord, ReasonCode, RelevanceAssessment, Stance };
 
@@ -499,9 +500,11 @@ export function computeConfidence(
   // Rating text presence on top match
   if (safeString(topMatch?.rating?.text)) score += 5;
 
-  // Match count
-  if (matches.length >= 4)      score += 10;
-  else if (matches.length >= 2) score += 5;
+  // Independent source count — use clustered representative count so that
+  // five articles from the same outlet don't inflate the bonus.
+  const { representativeCount } = clusterEvidence(matches);
+  if (representativeCount >= 4)      score += 10;
+  else if (representativeCount >= 2) score += 5;
 
   // Mixed evidence penalty
   let hasContradictionSignal = false;
