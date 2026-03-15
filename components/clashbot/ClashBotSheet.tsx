@@ -19,7 +19,7 @@ import {
   type ClaimFamilyStatus,
   type ClaimFamilyView,
 } from "@/lib/claim/claimFamily";
-import { type EvidenceRecord, type ReasonCode, type Stance } from "@/lib/claim/types";
+import { type ConfidenceTier, type EvidenceRecord, type ReasonCode, type Stance } from "@/lib/claim/types";
 import { formatEvidenceDate, formatVerificationAge } from "@/lib/clashbot/verificationService";
 import {
   getReasonCodeHelperText,
@@ -58,6 +58,8 @@ type VerificationResult = {
   message?: string;
   stance?: Stance;
   reasonCode?: ReasonCode;
+  confidenceScore?: number;
+  confidenceTier?: ConfidenceTier;
   relevance?: {
     relevant: boolean;
     reason: string;
@@ -437,6 +439,10 @@ function VerificationTracePanel({ claim }: { claim: ClaimItem }) {
           </Text>
           <Text style={styles.debugLine}>
             <Text style={styles.debugLineLabel}>Reason: </Text>{v?.reasonCode ?? "—"}
+          </Text>
+          <Text style={styles.debugLine}>
+            <Text style={styles.debugLineLabel}>Confidence: </Text>
+            {v?.confidenceTier ?? "—"}{v?.confidenceScore != null ? ` (${v.confidenceScore})` : ""}
           </Text>
           <Text style={styles.debugLine} numberOfLines={2}>
             <Text style={styles.debugLineLabel}>Evidence: </Text>{topMatch?.title ?? "—"}

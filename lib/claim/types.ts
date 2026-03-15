@@ -57,6 +57,16 @@ export type Stance = "supported" | "contradicted" | "unclear";
  * Authoritative = Google Fact Check or known-fact override (high-trust).
  * Coverage      = News/search coverage (signal, not a verdict).
  */
+/**
+ * Bucketed confidence in the verification outcome.
+ * Derived from confidenceScore via fixed thresholds:
+ *   high   ≥ 70  — authoritative source, clear stance, relevant match
+ *   medium ≥ 40  — coverage source with clear stance, or authoritative with caveats
+ *   low    ≥ 10  — weak signals, unclear stance, or relevance concerns
+ *   none   <  10 — no match, error, or effectively no usable evidence
+ */
+export type ConfidenceTier = "high" | "medium" | "low" | "none";
+
 export type ReasonCode =
   | "authoritative_contradiction"  // High-trust source says the claim is false
   | "authoritative_support"        // High-trust source confirms the claim
@@ -101,6 +111,8 @@ export type VerificationOutcome =
       status: "matched";
       stance: Stance;
       reasonCode?: ReasonCode;
+      confidenceScore?: number;
+      confidenceTier?: ConfidenceTier;
       mode: "factcheck" | "news" | "override";
       top: ProviderMatch;
       matches: ProviderMatch[];
@@ -111,6 +123,8 @@ export type VerificationOutcome =
       status: "no_match";
       stance: Stance;
       reasonCode?: ReasonCode;
+      confidenceScore?: number;
+      confidenceTier?: ConfidenceTier;
       mode: "factcheck" | "news" | "override";
       matches: ProviderMatch[];
       relevance?: RelevanceAssessment;
@@ -120,6 +134,8 @@ export type VerificationOutcome =
       status: "error";
       stance?: Stance;
       reasonCode?: ReasonCode;
+      confidenceScore?: number;
+      confidenceTier?: ConfidenceTier;
       mode?: "factcheck" | "news" | "override";
       matches?: ProviderMatch[];
       message?: string;

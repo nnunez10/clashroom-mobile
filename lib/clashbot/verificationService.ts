@@ -11,9 +11,9 @@
 
 import type { FactCheckMatch } from "./types";
 import { findKnownFactOverride } from "./knownFacts";
-import type { EvidenceRecord, ReasonCode, RelevanceAssessment, Stance } from "../claim/types";
+import type { ConfidenceTier, EvidenceRecord, ReasonCode, RelevanceAssessment, Stance } from "../claim/types";
 
-export type { EvidenceRecord, ReasonCode, RelevanceAssessment, Stance };
+export type { ConfidenceTier, EvidenceRecord, ReasonCode, RelevanceAssessment, Stance };
 
 // ---------------------------------------------------------------------------
 // Utilities — exported so useMockClashBotEngine can re-import them.
@@ -448,6 +448,86 @@ export function deriveReasonCode(
   return "insufficient_evidence";
 }
 
+/**
+ * Computes a conservative confidence score (0–100) and tier for a verification
+ * outcome. Scoring is additive from zero and fails low — no signal means no
+ * confidence. The unclear-stance cap (≤35) prevents an authoritative-but-
+ * ambiguous result from masquerading as medium confidence.
+ *
+ * Score components:
+ *   Provider base  — known_fact_override +40, google_factcheck +35, news +15
+ *   Stance clarity — clear + authoritative +25, clear + coverage +15
+ *   Relevance      — relevant +15, not relevant −30
+ *   Rating text    — top match has rating.text +5
+ *   Match count    — 2–3 matches +5, 4+ matches +10
+ *   Mixed evidence — both contradiction and support signals −15
+ *   Caps           — unclear stance ≤35, no_match/error hard 0
+ */
+export function computeConfidence(
+  stance: Stance,
+  status: string,
+  result: any,
+  assessment?: RelevanceAssessment,
+): { confidenceScore: number; confidenceTier: ConfidenceTier } {
+  if (status === "error" || status === "no_match") {
+    return { confidenceScore: 0, confidenceTier: "none" };
+  }
+
+  const matches: any[] = Array.isArray(result?.matches) ? result.matches : [];
+  const topMatch = result?.top || matches[0];
+  const topProvider = safeString(topMatch?.provider) || safeString(matches[0]?.provider);
+
+  let score = 0;
+
+  // Provider base
+  if (topProvider === "known_fact_override") score += 40;
+  else if (topProvider === "google_factcheck")  score += 35;
+  else if (topProvider === "bing_news" || topProvider === "newsapi") score += 15;
+  else if (topProvider) score += 5;
+
+  // Stance clarity
+  const isAuthoritative =
+    topProvider === "google_factcheck" || topProvider === "known_fact_override";
+  if (stance === "contradicted" || stance === "supported") {
+    score += isAuthoritative ? 25 : 15;
+  }
+
+  // Relevance
+  if (assessment?.relevant === true)  score += 15;
+  if (assessment?.relevant === false) score -= 30;
+
+  // Rating text presence on top match
+  if (safeString(topMatch?.rating?.text)) score += 5;
+
+  // Match count
+  if (matches.length >= 4)      score += 10;
+  else if (matches.length >= 2) score += 5;
+
+  // Mixed evidence penalty
+  let hasContradictionSignal = false;
+  let hasSupportSignal = false;
+  for (const m of matches) {
+    const ratingText = safeString(m?.rating?.text).toLowerCase();
+    if (!ratingText) continue;
+    if (countPhraseHits(ratingText, CONTRADICTION_PHRASES) > 0) hasContradictionSignal = true;
+    if (countPhraseHits(ratingText, SUPPORT_PHRASES) > 0)       hasSupportSignal = true;
+  }
+  if (hasContradictionSignal && hasSupportSignal) score -= 15;
+
+  // Unclear stance cap — cannot reach medium without a clear direction
+  if (stance === "unclear") score = Math.min(score, 35);
+
+  score = Math.max(0, Math.min(100, score));
+
+  const confidenceTier: ConfidenceTier =
+    score >= 70 ? "high"   :
+    score >= 40 ? "medium" :
+    score >= 10 ? "low"    :
+    "none";
+
+  return { confidenceScore: score, confidenceTier };
+}
+
 export function buildOverrideVerification(
   override: ReturnType<typeof findKnownFactOverride>
 ) {
@@ -457,6 +537,13 @@ export function buildOverrideVerification(
     ? ("contradicted" as const)
     : ("supported" as const);
 
+  const overrideMatchShape = {
+    matches: [{ provider: "known_fact_override", rating: { text: override.contradictsClaim ? "Contradicted" : "Supported" } }],
+  };
+  const { confidenceScore, confidenceTier } = computeConfidence(
+    overrideStance, "matched", overrideMatchShape, { relevant: true, reason: "Known fact override." }
+  );
+
   return {
     status: "matched" as const,
     mode: "fact_check" as const,
@@ -464,6 +551,8 @@ export function buildOverrideVerification(
     reasonCode: override.contradictsClaim
       ? ("authoritative_contradiction" as const)
       : ("authoritative_support" as const),
+    confidenceScore,
+    confidenceTier,
     relevance: {
       relevant: true,
       reason: "Known fact override matched this claim family.",
@@ -511,11 +600,14 @@ export function buildVerificationFromResult(
   const topOverride = bestTop !== undefined ? { top: bestTop } : {};
 
   if (result?.status === "matched" && !assessment.relevant) {
+    const { confidenceScore, confidenceTier } = computeConfidence("unclear", "matched", result, assessment);
     return {
       ...result,
       ...topOverride,
       stance: "unclear",
       reasonCode: deriveReasonCode("unclear", "matched", result, assessment),
+      confidenceScore,
+      confidenceTier,
       relevance: assessment,
       message: mergeVerificationMessage(
         result,
@@ -526,11 +618,14 @@ export function buildVerificationFromResult(
 
   if (result?.status === "matched" && assessment.relevant) {
     if (stance === "contradicted") {
+      const { confidenceScore, confidenceTier } = computeConfidence(stance, "matched", result, assessment);
       return {
         ...result,
         ...topOverride,
         stance,
         reasonCode: deriveReasonCode(stance, "matched", result, assessment),
+        confidenceScore,
+        confidenceTier,
         relevance: assessment,
         message: mergeVerificationMessage(
           result,
@@ -542,11 +637,14 @@ export function buildVerificationFromResult(
     }
 
     if (stance === "supported") {
+      const { confidenceScore, confidenceTier } = computeConfidence(stance, "matched", result, assessment);
       return {
         ...result,
         ...topOverride,
         stance,
         reasonCode: deriveReasonCode(stance, "matched", result, assessment),
+        confidenceScore,
+        confidenceTier,
         relevance: assessment,
         message: mergeVerificationMessage(
           result,
@@ -557,11 +655,14 @@ export function buildVerificationFromResult(
       };
     }
 
+    const { confidenceScore, confidenceTier } = computeConfidence(stance, "matched", result, assessment);
     return {
       ...result,
       ...topOverride,
       stance,
       reasonCode: deriveReasonCode(stance, "matched", result, assessment),
+      confidenceScore,
+      confidenceTier,
       relevance: assessment,
       message: mergeVerificationMessage(
         result,
@@ -577,6 +678,8 @@ export function buildVerificationFromResult(
       ...result,
       stance: "unclear",
       reasonCode: "no_reliable_match" as const,
+      confidenceScore: 0,
+      confidenceTier: "none" as const,
       relevance: {
         relevant: false,
         reason: "No direct matching source was returned.",
@@ -592,6 +695,8 @@ export function buildVerificationFromResult(
     status: "error",
     stance: "unclear",
     reasonCode: "provider_error" as const,
+    confidenceScore: 0,
+    confidenceTier: "none" as const,
     relevance: {
       relevant: false,
       reason: "Verification provider failed before a usable result was returned.",
@@ -608,6 +713,8 @@ export function buildExceptionVerification(error: any): {
   matches: never[];
   stance: "unclear";
   reasonCode: "provider_error";
+  confidenceScore: 0;
+  confidenceTier: "none";
   relevance: { relevant: false; reason: string };
   message: string;
 } {
@@ -620,6 +727,8 @@ export function buildExceptionVerification(error: any): {
     matches: [],
     stance: "unclear",
     reasonCode: "provider_error",
+    confidenceScore: 0,
+    confidenceTier: "none",
     relevance: {
       relevant: false,
       reason: "Verification request threw an exception.",

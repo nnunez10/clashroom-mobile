@@ -46,14 +46,54 @@ function splitSentences(text: string): string[] {
   return parts;
 }
 
+// Leading discourse markers stripped from transcript sentences before scoring
+// and before writing claim.text. Ordered longest-first so multi-word phrases
+// match before their single-word prefixes.
+const FILLER_PREFIXES = [
+  "right so ",
+  "i mean ",
+  "you know ",
+  "trust me ",
+  "believe me ",
+  "the thing is ",
+  "here's the thing ",
+  "apparently ",
+  "reportedly ",
+  "supposedly ",
+  "allegedly ",
+  "actually ",
+  "basically ",
+  "literally ",
+  "frankly ",
+  "look ",
+  "listen ",
+];
+
+function stripFillerPrefix(s: string): string {
+  const lower = s.toLowerCase();
+  for (const prefix of FILLER_PREFIXES) {
+    if (lower.startsWith(prefix)) {
+      const rest = s.slice(prefix.length).trimStart();
+      // Restore sentence-initial capitalisation.
+      return rest.length > 0 ? rest[0].toUpperCase() + rest.slice(1) : rest;
+    }
+  }
+  return s;
+}
+
 function isJunkSentence(s: string) {
   const t = normalize(s);
 
-  if (t.length < 22) return true;
+  if (t.length < 15) return true;
 
   if (s.includes("?")) return true;
 
-  const junkStarts = ["hey", "yo", "okay", "ok", "well", "so", "like"];
+  const junkStarts = [
+    "hey", "yo", "okay", "ok", "well", "so", "like",
+    "you know", "i mean", "right so", "trust me", "believe me",
+    // Gen-Z / internet-discourse starters
+    "nah", "fr", "no cap", "lowkey", "ngl", "tbh", "bruh", "bro", "imo",
+  ];
   if (junkStarts.some((w) => t.startsWith(w + " "))) return true;
 
   const junkPhrases = [
@@ -68,6 +108,7 @@ function isJunkSentence(s: string) {
     "it is nice",
     "thats crazy",
     "that is crazy",
+    "i mean",
   ];
   if (junkPhrases.some((p) => t.includes(p))) return true;
 
@@ -97,6 +138,14 @@ function scoreSentence(s: string) {
     " confirmed ",
     " says ",
     " said ",
+    // accusation / state verbs — common in live debate claims
+    " lies ",
+    " misleads ",
+    " manipulates ",
+    " cheats ",
+    " exploits ",
+    " violates ",
+    " breaks ",
   ];
   if (verbs.some((v) => t.includes(v))) score += 2;
 
@@ -114,12 +163,45 @@ function scoreSentence(s: string) {
 
   if (t.length > 180) score -= 1;
 
+  // Strong causal/evidential verbs are an extra signal on top of the generic
+  // verb bucket above — a sentence whose core verb is directly causal or
+  // evidential is more likely to be a verifiable claim.
+  const strongVerbs = [" cause ", " causes ", " caused ", " proves ", " prove ", " disproves ", " disprove "];
+  if (strongVerbs.some((v) => t.includes(v))) score += 1;
+
+  // Words that name a contestable factual assertion regardless of sentence length.
+  const claimWords = new Set(["fake", "hoax", "debunked", "disproven", "lied", "fabricated"]);
+  if (t.split(/\s+/).some((w) => claimWords.has(w))) score += 1;
+
+  // Targeted +1 for specific negation constructions that signal a testable
+  // factual claim ("vaccines are not safe", "this does not cause cancer").
+  // Includes both written-out forms and normalized contractions (apostrophe
+  // stripped to space by normalize()). Generic " not " alone is not included.
+  const negationPatterns = [
+    " is not ", " are not ", " was not ", " were not ",
+    " do not ", " does not ", " did not ",
+    " isn t ",  // isn't
+    " aren t ", // aren't
+    " wasn t ", // wasn't
+    " weren t ", // weren't
+    " don t ",  // don't
+    " doesn t ", // doesn't
+    " didn t ", // didn't
+    " can t ",  // can't
+  ];
+  if (negationPatterns.some((n) => t.includes(n))) score += 1;
+
   return score;
 }
 
 function looksLikeClaim(sentence: string) {
   if (isJunkSentence(sentence)) return false;
-  return scoreSentence(sentence) >= 2;
+  const t = normalize(sentence);
+  const score = scoreSentence(sentence);
+  // Short sentences (15–21 chars) need a stronger signal to be admitted —
+  // they bypass the length gate in isJunkSentence but can still be weak filler.
+  if (t.length < 22) return score >= 3;
+  return score >= 2;
 }
 
 export function claimFingerprint(text: string) {
@@ -130,7 +212,10 @@ export function extractClaimsFromLine(text: string, ts: number): Claim[] {
   const sentences = splitSentences(text);
 
   const candidates = sentences
-    .map((s) => ({ s, score: scoreSentence(s) }))
+    .map((s) => {
+      const stripped = stripFillerPrefix(s);
+      return { s: stripped, score: scoreSentence(stripped) };
+    })
     .filter((x) => looksLikeClaim(x.s))
     .sort((a, b) => b.score - a.score);
 

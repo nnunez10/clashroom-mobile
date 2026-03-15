@@ -8,6 +8,7 @@ function sanitizeClaimText(input: string) {
 function isTooWeakToVerify(text: string) {
   if (!text) return true;
   if (text.length < 8) return true;
+  if (text.split(/\s+/).filter(Boolean).length < 2) return true;
   return false;
 }
 

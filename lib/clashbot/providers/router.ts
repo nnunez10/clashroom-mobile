@@ -9,6 +9,13 @@ function hasMatches(result: VerificationResult) {
   return Array.isArray(result.matches) && result.matches.length > 0;
 }
 
+// True if at least one match carries a verdict rating — the main signal that
+// separates a useful Google Fact Check result from a bare URL-only entry.
+function hasRatedMatches(result: VerificationResult) {
+  if (result.status !== "matched") return false;
+  return result.matches.some((m) => !!m.rating?.text);
+}
+
 function getMessage(result: VerificationResult) {
   return "message" in result ? result.message || "" : "";
 }
@@ -18,11 +25,15 @@ export async function routeVerification(text: string): Promise<VerificationResul
   let bing: VerificationResult = { status: "no_match", matches: [] };
   let news: VerificationResult = { status: "no_match", matches: [] };
 
-  // 1) Formal fact checks first
+  // 1) Formal fact checks first — only short-circuit if matches carry a rating.
+  //    Unrated Google entries (URL-only, no verdict text) fall through to Bing
+  //    so the user gets richer coverage context rather than a bare link.
+  //    The unrated results are preserved in `google` and used as a last resort
+  //    at the end if Bing and NewsAPI also find nothing.
   try {
     google = await googleFactCheckSearch(text);
 
-    if (google.status === "matched" && hasMatches(google)) {
+    if (google.status === "matched" && hasMatches(google) && hasRatedMatches(google)) {
       return {
         status: "matched",
         matches: google.matches,
@@ -75,6 +86,18 @@ export async function routeVerification(text: string): Promise<VerificationResul
       status: "error",
       matches: [],
       message: err?.message || "NewsAPI provider failure.",
+    };
+  }
+
+  // Unrated Google results that fell through above: return them now rather than
+  // reporting no_match — they are still real fact-check entries, just missing a
+  // verdict rating. Bing and NewsAPI already had their chance above.
+  if (google.status === "matched" && hasMatches(google)) {
+    return {
+      status: "matched",
+      matches: google.matches,
+      top: google.top ?? google.matches[0],
+      mode: google.mode ?? "fact_check",
     };
   }
 
