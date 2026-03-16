@@ -151,16 +151,52 @@ function extractNumbers(s: string): string[] {
 
 function extractNamedEntitiesHeuristic(s: string): string[] {
   const text = String(s || "");
+  const entities = new Set<string>();
 
-  const capsPhrases = text.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b/g) || [];
-  const allCaps = text.match(/\b([A-Z]{2,})\b/g) || [];
+  // Tier 1 — All-caps acronyms (NASA, COVID, FBI, DNA).
+  // Reliable proper nouns regardless of position.
+  for (const m of text.match(/\b([A-Z]{2,})\b/g) || []) {
+    entities.add(m.toLowerCase());
+  }
 
-  const combined = [...capsPhrases, ...allCaps]
-    .map((x) => x.trim())
-    .filter(Boolean)
-    .filter((x) => x.length >= 3);
+  // Tier 2 — Multi-word title-case phrases (Great Barrier Reef, Steve Jobs, Federal Reserve).
+  // Requiring ≥2 consecutive title-case words makes sentence-start ambiguity irrelevant:
+  // a sentence will rarely start with two consecutive proper nouns by convention.
+  for (const m of text.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b/g) || []) {
+    entities.add(m.toLowerCase());
+  }
 
-  return Array.from(new Set(combined.map((x) => x.toLowerCase())));
+  // Tier 3 — Single title-case words in non-sentence-initial positions only.
+  //
+  // Words that appear *exclusively* at sentence-initial positions are likely
+  // conventional sentence capitalization ("Regular aspirin...", "Exercise reduces..."),
+  // not genuine proper nouns.  Accept a sentence-initial word only if it also appears
+  // capitalized mid-sentence — confirming it is a proper noun used in both contexts.
+  //
+  // Sentence-initial = very start of text or immediately after [.?!] + whitespace.
+  const sentenceStarts = new Set<string>();
+  for (const raw of text.match(/(?:^|[.?!]\s+)([A-Z][a-z]+)\b/g) || []) {
+    const word = raw.replace(/^[^A-Za-z]+/, "");
+    sentenceStarts.add(word.toLowerCase());
+  }
+
+  for (const m of text.match(/\b([A-Z][a-z]+)\b/g) || []) {
+    const lower = m.toLowerCase();
+    if (lower.length < 3 || STOP.has(lower)) continue;
+
+    if (!sentenceStarts.has(lower)) {
+      // Appears capitalized only in non-sentence-initial positions → proper noun.
+      entities.add(lower);
+    } else {
+      // Appears at a sentence-initial position. Accept only if it also appears
+      // capitalized mid-sentence (totalCount > sentence-initial count).
+      const totalCount = (text.match(new RegExp(`\\b${m}\\b`, "g")) || []).length;
+      const startCount = (text.match(new RegExp(`(?:^|[.?!]\\s+)${m}\\b`, "g")) || []).length;
+      if (totalCount > startCount) entities.add(lower);
+    }
+  }
+
+  return Array.from(entities);
 }
 
 function setOverlapCount(a: string[], b: string[]): number {
@@ -274,6 +310,24 @@ export function assessRelevance(
         relevant: true,
         reason: "Source shares a key entity or number with the claim.",
       };
+    }
+
+    // Entity/number anchors present but no direct entity-list overlap found.
+    // Final check: do claim entity words appear in the match's token set?
+    // This handles the asymmetric case where an entity extracted mid-sentence in
+    // the claim appears at sentence-start in the match text (and is therefore not
+    // in matchEnts due to the sentence-initial capitalization filter).
+    if (claimEnts.length > 0) {
+      const matchToks = new Set(meaningfulTokens(matchText));
+      const entityInTokens = claimEnts.some((e) =>
+        e.split(/\s+/).filter(Boolean).every((w) => matchToks.has(w))
+      );
+      if (entityInTokens) {
+        return {
+          relevant: true,
+          reason: "Source shares a key entity with the claim.",
+        };
+      }
     }
 
     return {

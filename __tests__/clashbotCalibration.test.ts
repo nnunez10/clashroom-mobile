@@ -191,21 +191,18 @@ const FIXTURES: CalibrationFixture[] = [
   },
 
   // ── F04: Mixed evidence — google says both True and False ─────────────────
-  // NOTE: Calibration finding — sentence-start capitals create phantom entity anchors.
-  // Claim must share a capitalized entity that also appears capitalized in the match text.
-  // "Aspirin" appears in match.claim → reliable shared entity anchor.
   {
     id: "F04",
     scenario: "mixed evidence (conflicting authoritative ratings)",
-    claimText: "Aspirin taken daily prevents heart attacks",
+    claimText: "Regular aspirin use prevents heart attacks",
     result: {
       status: "matched",
       mode: "fact_check",
       matches: [
         {
           provider: "google_factcheck",
-          claim: "Aspirin prevents heart attacks in most patients",
-          title: "Does daily Aspirin prevent heart attacks? Study says yes",
+          claim: "Aspirin prevents heart attacks",
+          title: "Does daily aspirin prevent heart attacks? Study says yes",
           rating: { text: "True" },
           url: "https://healthline.com/aspirin-heart-1",
           publisher: "Healthline",
@@ -249,21 +246,19 @@ const FIXTURES: CalibrationFixture[] = [
   },
 
   // ── F06: Coverage support (newsapi, relevant) ─────────────────────────────
-  // NOTE: Calibration finding — sentence-start capitals create phantom entity anchors.
-  // Use a number anchor ("35 percent") shared by both claim and match to ensure relevance.
   {
     id: "F06",
     scenario: "coverage support (newsapi)",
-    claimText: "Aerobic exercise reduces cardiovascular disease risk by 35 percent",
+    claimText: "Exercise regularly reduces the risk of cardiovascular disease",
     result: {
       status: "matched",
       mode: "recent_coverage",
       matches: [
         {
           provider: "newsapi",
-          title: "Aerobic exercise cuts cardiovascular disease risk by 35 percent study shows",
+          title: "Regular exercise reduces heart disease risk, large study confirms",
           rating: { text: "True" },
-          url: "https://healthnews.com/aerobic-exercise-35pct",
+          url: "https://healthnews.com/exercise-heart-study",
           publisher: "Health News",
         },
       ],
