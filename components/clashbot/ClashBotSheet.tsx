@@ -1,5 +1,32 @@
-import React, { useEffect, useMemo, useState } from "react";
 import {
+  buildClaimFamilyViews,
+  getFamilyStatusLabel,
+  getFamilySummaryLine,
+  getLatestFamilyEvent,
+  type ClaimFamilyStatus,
+} from "@/lib/claim/claimFamily";
+import {
+  type ConfidenceTier,
+  type EvidenceRecord,
+  type ReasonCode,
+  type Stance,
+} from "@/lib/claim/types";
+import { clusterEvidence } from "@/lib/clashbot/evidenceClustering";
+import { suggestTypoCorrection } from "@/lib/clashbot/normalizeInput";
+import { getResultExplanation } from "@/lib/clashbot/resultExplanation";
+import {
+  getReasonCodeHelperText,
+  getStatusPresentation,
+  type StatusStyleKey,
+} from "@/lib/clashbot/statusPresentation";
+import {
+  formatEvidenceDate,
+  formatVerificationAge,
+} from "@/lib/clashbot/verificationService";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Keyboard,
+  KeyboardAvoidingView,
   LayoutAnimation,
   Linking,
   Platform,
@@ -9,24 +36,8 @@ import {
   Text,
   TextInput,
   UIManager,
-  View
+  View,
 } from "react-native";
-import {
-  buildClaimFamilyViews,
-  getFamilyStatusLabel,
-  getFamilySummaryLine,
-  getLatestFamilyEvent,
-  type ClaimFamilyStatus,
-  type ClaimFamilyView,
-} from "@/lib/claim/claimFamily";
-import { type ConfidenceTier, type EvidenceRecord, type ReasonCode, type Stance } from "@/lib/claim/types";
-import { clusterEvidence } from "@/lib/clashbot/evidenceClustering";
-import { formatEvidenceDate, formatVerificationAge } from "@/lib/clashbot/verificationService";
-import {
-  getReasonCodeHelperText,
-  getStatusPresentation,
-  type StatusStyleKey,
-} from "@/lib/clashbot/statusPresentation";
 
 if (
   Platform.OS === "android" &&
@@ -84,7 +95,13 @@ type ClaimEvent = {
 type ClaimItem = {
   id: string;
   text: string;
-  status?: "queued" | "checking" | "matched" | "no_match" | "error" | "disputed";
+  status?:
+    | "queued"
+    | "checking"
+    | "matched"
+    | "no_match"
+    | "error"
+    | "disputed";
   verification?: VerificationResult | any;
   checkingAt?: number;
   completedAt?: number;
@@ -93,6 +110,7 @@ type ClaimItem = {
   derivedFromClaimId?: string | null;
   evidence?: EvidenceRecord[];
   events?: ClaimEvent[];
+  suggestedText?: string;
   claimDna?: {
     normalized?: string;
     fingerprint?: string;
@@ -109,31 +127,50 @@ type ClashBotSheetProps = {
   transcript: string[];
   claims: ClaimItem[];
   onSubmitClaim: (text: string) => void;
+  onDashboardSubmit?: (text: string) => void;
   mode?: "dashboard" | "quick_verify";
   initialDraft?: string;
+  quickVerifyTarget?: string;
 };
 
-function getStatusBadge(status?: ClaimItem["status"], stance?: Stance, reasonCode?: ReasonCode) {
-  const { label, styleKey, reasonCode: code } = getStatusPresentation(status, stance, reasonCode);
+function getStatusBadge(
+  status?: ClaimItem["status"],
+  stance?: Stance,
+  reasonCode?: ReasonCode
+) {
+  const {
+    label,
+    styleKey,
+    reasonCode: code,
+  } = getStatusPresentation(status, stance, reasonCode);
+
   const styleMap: Record<StatusStyleKey, object> = {
-    statusMatched:     styles.statusMatched,
-    statusDisputed:    styles.statusDisputed,
+    statusMatched: styles.statusMatched,
+    statusDisputed: styles.statusDisputed,
     statusUnconfirmed: styles.statusUnconfirmed,
-    statusChecking:    styles.statusChecking,
-    statusNoMatch:     styles.statusNoMatch,
-    statusError:       styles.statusError,
-    statusQueued:      styles.statusQueued,
+    statusChecking: styles.statusChecking,
+    statusNoMatch: styles.statusNoMatch,
+    statusError: styles.statusError,
+    statusQueued: styles.statusQueued,
   };
+
   return { label, style: styleMap[styleKey], reasonCode: code };
 }
 
 function getSourceTypeLabel(verification?: VerificationResult | any) {
-  const provider = verification?.top?.provider || verification?.matches?.[0]?.provider;
+  const provider =
+    verification?.top?.provider || verification?.matches?.[0]?.provider;
   const mode = verification?.mode;
 
   if (provider === "known_fact_override") return "Known Fact";
-  if (mode === "fact_check" || provider === "google_factcheck") return "Fact Check";
-  if (mode === "recent_coverage" || provider === "bing_news" || provider === "newsapi") {
+  if (mode === "fact_check" || provider === "google_factcheck") {
+    return "Fact Check";
+  }
+  if (
+    mode === "recent_coverage" ||
+    provider === "bing_news" ||
+    provider === "newsapi"
+  ) {
     return "Recent Coverage";
   }
 
@@ -181,7 +218,10 @@ function getVerdictLabel(claim: ClaimItem) {
 function getEvidenceSummary(verification?: VerificationResult | any) {
   if (!verification) return null;
 
-  const totalMatches = Array.isArray(verification?.matches) ? verification.matches.length : 0;
+  const totalMatches = Array.isArray(verification?.matches)
+    ? verification.matches.length
+    : 0;
+
   const provider =
     verification?.top?.provider ||
     verification?.matches?.[0]?.provider ||
@@ -191,19 +231,19 @@ function getEvidenceSummary(verification?: VerificationResult | any) {
     provider === "google_factcheck"
       ? "Google Fact Check"
       : provider === "known_fact_override"
-      ? "Known Fact Override"
-      : provider === "bing_news"
-      ? "Bing News"
-      : provider === "newsapi"
-      ? "NewsAPI"
-      : verification?.mode === "recent_coverage"
-      ? "Recent Coverage"
-      : verification?.mode === "fact_check"
-      ? "Fact Check"
-      : "Source Scan";
+        ? "Known Fact Override"
+        : provider === "bing_news"
+          ? "Bing News"
+          : provider === "newsapi"
+            ? "NewsAPI"
+            : verification?.mode === "recent_coverage"
+              ? "Recent Coverage"
+              : verification?.mode === "fact_check"
+                ? "Fact Check"
+                : "Source Scan";
 
   if (totalMatches > 1) {
-    return `${providerLabel} found ${totalMatches} sources — showing top match.`;
+    return `${providerLabel} found ${totalMatches} sources — showing top independent matches.`;
   }
 
   if (totalMatches === 1) {
@@ -222,6 +262,21 @@ function getEvidenceSummary(verification?: VerificationResult | any) {
   }
 
   return null;
+}
+
+function getEvidenceRepresentatives(
+  verification: VerificationResult | any,
+  max: number = 3
+): FactCheckMatch[] {
+  const { clusters } = clusterEvidence(verification?.matches);
+  return clusters.slice(0, max).map((c) => c.representative);
+}
+
+function getEvidenceProviderLabel(provider?: string): string {
+  if (provider === "google_factcheck") return "Fact Check";
+  if (provider === "known_fact_override") return "Known Fact";
+  if (provider === "bing_news" || provider === "newsapi") return "Coverage";
+  return "Source";
 }
 
 function getVerdictTone(claim: ClaimItem) {
@@ -260,8 +315,34 @@ function getVerdictTextTone(claim: ClaimItem) {
   }
 }
 
+function effectiveDisplayStatus(claim: ClaimItem): ClaimItem["status"] {
+  const stance = claim.verification?.stance;
+  if (stance === "contradicted") return "disputed";
+
+  if (claim.status === "matched") {
+    const ratingText = String(
+      claim.verification?.top?.rating?.text ||
+        claim.verification?.top?.rating?.raw ||
+        claim.verification?.matches?.[0]?.rating?.text ||
+        claim.verification?.matches?.[0]?.rating?.raw ||
+        ""
+    ).toLowerCase();
+
+    if (
+      ratingText.includes("false") ||
+      ratingText.includes("misleading") ||
+      ratingText.includes("incorrect") ||
+      ratingText.includes("debunked")
+    ) {
+      return "disputed";
+    }
+  }
+
+  return claim.status;
+}
+
 function getTimelineStepState(claim: ClaimItem) {
-  const status = claim.status;
+  const status = effectiveDisplayStatus(claim);
 
   return {
     queued:
@@ -286,7 +367,7 @@ function getTimelineStepState(claim: ClaimItem) {
 }
 
 function getTimelineResultLabel(claim: ClaimItem) {
-  switch (claim.status) {
+  switch (effectiveDisplayStatus(claim)) {
     case "matched":
       return "Verified";
     case "disputed":
@@ -301,7 +382,7 @@ function getTimelineResultLabel(claim: ClaimItem) {
 }
 
 function getTimelineResultTone(claim: ClaimItem) {
-  switch (claim.status) {
+  switch (effectiveDisplayStatus(claim)) {
     case "matched":
       return styles.timelineStepDone;
     case "disputed":
@@ -358,27 +439,6 @@ function getShortId(value?: string | null, keep = 10) {
   return value.slice(0, keep);
 }
 
-function formatEventType(type?: string) {
-  if (!type) return "Unknown event";
-  return type
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (m) => m.toUpperCase());
-}
-
-function safeTimeFromNumber(value?: number | null) {
-  if (!value || Number.isNaN(value)) return 0;
-  return value;
-}
-
-function getClaimCreatedTime(claim: ClaimItem) {
-  return (
-    safeTimeFromNumber(claim.timeline?.queuedAt) ||
-    safeTimeFromNumber(claim.checkingAt) ||
-    safeTimeFromNumber(claim.completedAt) ||
-    0
-  );
-}
-
 function getFamilyStatusStyle(status: ClaimFamilyStatus) {
   switch (status) {
     case "matched":
@@ -396,6 +456,13 @@ function getFamilyStatusStyle(status: ClaimFamilyStatus) {
     default:
       return styles.statusQueued;
   }
+}
+
+function formatEventType(type?: string) {
+  if (!type) return "Unknown event";
+  return type
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
 async function openLink(url?: string) {
@@ -420,7 +487,10 @@ function VerificationTracePanel({ claim }: { claim: ClaimItem }) {
 
   return (
     <View style={styles.debugCard}>
-      <Pressable style={styles.debugHeaderRow} onPress={() => setOpen((o) => !o)}>
+      <Pressable
+        style={styles.debugHeaderRow}
+        onPress={() => setOpen((o) => !o)}
+      >
         <Text style={styles.debugTitle}>Verification Trace</Text>
         <View style={styles.debugPill}>
           <Text style={styles.debugPillText}>{open ? "Hide" : "Show"}</Text>
@@ -430,23 +500,29 @@ function VerificationTracePanel({ claim }: { claim: ClaimItem }) {
       {open && (
         <>
           <Text style={styles.debugLine} numberOfLines={3}>
-            <Text style={styles.debugLineLabel}>Claim: </Text>{claim.text}
+            <Text style={styles.debugLineLabel}>Claim: </Text>
+            {claim.text}
           </Text>
           <Text style={styles.debugLine}>
-            <Text style={styles.debugLineLabel}>Provider: </Text>{provider}
+            <Text style={styles.debugLineLabel}>Provider: </Text>
+            {provider}
           </Text>
           <Text style={styles.debugLine}>
-            <Text style={styles.debugLineLabel}>Stance: </Text>{v?.stance ?? "—"}
+            <Text style={styles.debugLineLabel}>Stance: </Text>
+            {v?.stance ?? "—"}
           </Text>
           <Text style={styles.debugLine}>
-            <Text style={styles.debugLineLabel}>Reason: </Text>{v?.reasonCode ?? "—"}
+            <Text style={styles.debugLineLabel}>Reason: </Text>
+            {v?.reasonCode ?? "—"}
           </Text>
           <Text style={styles.debugLine}>
             <Text style={styles.debugLineLabel}>Confidence: </Text>
-            {v?.confidenceTier ?? "—"}{v?.confidenceScore != null ? ` (${v.confidenceScore})` : ""}
+            {v?.confidenceTier ?? "—"}
+            {v?.confidenceScore != null ? ` (${v.confidenceScore})` : ""}
           </Text>
           {(() => {
-            const { representativeCount, totalMatches, duplicateCount } = clusterEvidence(v?.matches);
+            const { representativeCount, totalMatches, duplicateCount } =
+              clusterEvidence(v?.matches);
             return (
               <Text style={styles.debugLine}>
                 <Text style={styles.debugLineLabel}>Clusters: </Text>
@@ -456,17 +532,21 @@ function VerificationTracePanel({ claim }: { claim: ClaimItem }) {
             );
           })()}
           <Text style={styles.debugLine} numberOfLines={2}>
-            <Text style={styles.debugLineLabel}>Evidence: </Text>{topMatch?.title ?? "—"}
+            <Text style={styles.debugLineLabel}>Evidence: </Text>
+            {topMatch?.title ?? "—"}
           </Text>
           <Text style={styles.debugLine}>
-            <Text style={styles.debugLineLabel}>Source: </Text>{topMatch?.publisher ?? "—"}
+            <Text style={styles.debugLineLabel}>Source: </Text>
+            {topMatch?.publisher ?? "—"}
           </Text>
           <Text style={styles.debugLine}>
-            <Text style={styles.debugLineLabel}>Age: </Text>{evidenceAge}
+            <Text style={styles.debugLineLabel}>Age: </Text>
+            {evidenceAge}
           </Text>
           {!!v?.message && (
             <Text style={styles.debugLine} numberOfLines={3}>
-              <Text style={styles.debugLineLabel}>Message: </Text>{v.message}
+              <Text style={styles.debugLineLabel}>Message: </Text>
+              {v.message}
             </Text>
           )}
         </>
@@ -475,32 +555,191 @@ function VerificationTracePanel({ claim }: { claim: ClaimItem }) {
   );
 }
 
-function QuickVerifyStatus({ claims }: { claims: ClaimItem[] }) {
-  const latest = claims[0] ?? null;
+const CHECKING_PHRASES = [
+  "Searching sources…",
+  "Comparing evidence…",
+  "Checking facts…",
+  "Analyzing match…",
+];
+
+function QuickVerifyStatus({
+  claims,
+  compact,
+  quickVerifyTarget,
+}: {
+  claims: ClaimItem[];
+  compact?: boolean;
+  quickVerifyTarget?: string;
+}) {
+  const [phraseIdx, setPhraseIdx] = useState(0);
+
+  const latest = useMemo(() => {
+    if (quickVerifyTarget) {
+      const t = quickVerifyTarget.trim().toLowerCase();
+      return (
+        claims.find(
+          (c) =>
+            (c.status === "checking" || c.status === "queued") &&
+            c.text?.trim().toLowerCase() === t
+        ) ??
+        claims.find((c) => c.text?.trim().toLowerCase() === t) ??
+        null
+      );
+    }
+
+    return (
+      claims.find((c) => c.status === "checking" || c.status === "queued") ??
+      claims[0] ??
+      null
+    );
+  }, [claims, quickVerifyTarget]);
+
+  const isChecking = latest?.status === "checking";
+
+  useEffect(() => {
+    if (!isChecking) return;
+    const interval = setInterval(() => {
+      setPhraseIdx((i) => (i + 1) % CHECKING_PHRASES.length);
+    }, 1800);
+    return () => clearInterval(interval);
+  }, [isChecking]);
 
   if (!latest) {
     return (
       <View style={styles.quickStatusCard}>
-        <Text style={styles.quickStatusText}>Claim submitted — verifying…</Text>
+        <Text style={styles.quickStatusText}>Queued for verification…</Text>
       </View>
     );
   }
 
+  const verification = latest.verification;
+  const topMatch: FactCheckMatch | undefined =
+    verification?.top || verification?.matches?.[0];
+
+  const statusBadge = getStatusBadge(
+    effectiveDisplayStatus(latest),
+    latest.verification?.stance,
+    latest.verification?.reasonCode
+  );
+
+  const { representativeCount: qvRepCount } = clusterEvidence(
+    latest.verification?.matches
+  );
+
+  const helperText =
+    getResultExplanation({
+      status: latest.status,
+      stance: latest.verification?.stance,
+      reasonCode: statusBadge.reasonCode,
+      confidenceTier: latest.verification?.confidenceTier,
+      representativeCount: qvRepCount,
+    }) ?? getReasonCodeHelperText(statusBadge.reasonCode);
+
+  const sourceType = getSourceTypeLabel(verification);
+  const evidenceSummary = getEvidenceSummary(verification);
+  const evidenceDate = formatEvidenceDate(topMatch?.claimDate, verification?.mode);
+  const evidenceReps = getEvidenceRepresentatives(verification);
   const isActive = latest.status === "checking" || latest.status === "queued";
-  const statusBadge = getStatusBadge(latest.status, latest.verification?.stance, latest.verification?.reasonCode);
-  const helperText = getReasonCodeHelperText(statusBadge.reasonCode);
 
   return (
     <View style={styles.quickStatusCard}>
       <View style={[styles.statusBadge, statusBadge.style]}>
         <Text style={styles.statusBadgeText}>{statusBadge.label}</Text>
       </View>
-      {!!helperText && <Text style={styles.badgeHelperText}>{helperText}</Text>}
+
+      {!!helperText && (
+        <Text style={styles.quickStatusExplanation}>{helperText}</Text>
+      )}
+
       <Text style={styles.quickStatusClaimText} numberOfLines={2}>
         {latest.text}
       </Text>
+
       {isActive && (
-        <Text style={styles.quickStatusHint}>Checking sources…</Text>
+        <Text style={styles.quickStatusHint}>
+          {isChecking ? CHECKING_PHRASES[phraseIdx] : "Queued for verification…"}
+        </Text>
+      )}
+
+      {!!verification && (
+        <View style={styles.quickEvidenceWrap}>
+          <View style={styles.metaRow}>
+            <View style={styles.sourceTypeBadge}>
+              <Text style={styles.sourceTypeBadgeText}>{sourceType}</Text>
+            </View>
+
+            {(!!topMatch?.publisher || !!evidenceDate) && (
+              <Text style={styles.publisherText} numberOfLines={1}>
+                {[topMatch?.publisher, evidenceDate].filter(Boolean).join(" · ")}
+              </Text>
+            )}
+          </View>
+
+          {!compact && !!verification?.message && (
+            <Text style={styles.messageText}>{verification.message}</Text>
+          )}
+
+          {!compact && !!verification?.relevance?.reason && (
+            <Text style={styles.relevanceText}>
+              Relevance: {verification.relevance.reason}
+            </Text>
+          )}
+
+          {!compact && !!evidenceSummary && (
+            <Text style={styles.evidenceSummaryText}>{evidenceSummary}</Text>
+          )}
+
+          {!compact && evidenceReps.length > 0 && (
+            <View style={styles.evidencePreview}>
+              {evidenceReps.map((rep, idx) => {
+                const repDate =
+                  formatEvidenceDate(rep.claimDate, verification?.mode) ?? undefined;
+                const repMeta = [rep.publisher, repDate].filter(Boolean).join(" · ");
+                const repRating = rep.rating?.text ?? rep.rating?.raw ?? null;
+
+                return (
+                  <Pressable
+                    key={`${latest.id}-qv-rep-${idx}`}
+                    onPress={rep.url ? () => openLink(rep.url) : undefined}
+                    style={styles.sourceItem}
+                  >
+                    <View style={styles.sourceItemTopRow}>
+                      <Text style={styles.sourceItemTitle} numberOfLines={2}>
+                        {rep.title || rep.claimReviewed || "Source"}
+                      </Text>
+
+                      {!!rep.provider && (
+                        <View style={styles.miniSourceBadge}>
+                          <Text style={styles.miniSourceBadgeText}>
+                            {getEvidenceProviderLabel(rep.provider)}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+
+                    {!!repMeta && (
+                      <Text style={styles.sourceItemPublisher} numberOfLines={1}>
+                        {repMeta}
+                      </Text>
+                    )}
+
+                    {!!repRating && (
+                      <Text style={styles.sourceItemRating} numberOfLines={1}>
+                        {repRating}
+                      </Text>
+                    )}
+
+                    {!!rep.url && (
+                      <Text style={styles.sourceItemTap}>
+                        {rep.publisher ? `Open ${rep.publisher} →` : "Open source →"}
+                      </Text>
+                    )}
+                  </Pressable>
+                );
+              })}
+            </View>
+          )}
+        </View>
       )}
     </View>
   );
@@ -512,15 +751,46 @@ export default function ClashBotSheet({
   transcript,
   claims,
   onSubmitClaim,
+  onDashboardSubmit,
   mode = "dashboard",
   initialDraft = "",
+  quickVerifyTarget,
 }: ClashBotSheetProps) {
   const [draft, setDraft] = useState(initialDraft);
-  const [expandedFamilies, setExpandedFamilies] = useState<Record<string, boolean>>({});
+  const [closeEnabled, setCloseEnabled] = useState(false);
+  const [expandedFamilies, setExpandedFamilies] = useState<Record<string, boolean>>(
+    {}
+  );
+  const [dashboardVerifyTarget, setDashboardVerifyTarget] = useState("");
+  const inputRef = useRef<TextInput | null>(null);
+
+  console.log("[ClashBot] render", {
+    isOpen,
+    mode,
+    draftLength: draft.length,
+  });
+
+  const prevIsOpenRef = useRef(false);
 
   useEffect(() => {
-    setDraft(initialDraft);
-  }, [initialDraft, isOpen]);
+    if (isOpen && !prevIsOpenRef.current) {
+      console.log("[ClashBot] seeding draft:", initialDraft);
+      setDraft(initialDraft);
+      if (mode === "dashboard") {
+        setDashboardVerifyTarget("");
+      }
+    }
+    prevIsOpenRef.current = isOpen;
+  }, [isOpen, initialDraft, mode]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setCloseEnabled(false);
+      return;
+    }
+    const t = setTimeout(() => setCloseEnabled(true), 250);
+    return () => clearTimeout(t);
+  }, [isOpen]);
 
   const sortedClaims = useMemo(() => {
     return [...claims].reverse();
@@ -529,6 +799,32 @@ export default function ClashBotSheet({
   const familyViews = useMemo(() => {
     return buildClaimFamilyViews(sortedClaims);
   }, [sortedClaims]);
+
+  const draftSuggestion = useMemo(() => {
+    if (mode !== "dashboard" || draft.length <= 5) return null;
+    return suggestTypoCorrection(draft);
+  }, [mode, draft]);
+
+  const latestDashboardClaim = sortedClaims[0] ?? null;
+
+  useEffect(() => {
+    if (!dashboardVerifyTarget) return;
+
+    const t = dashboardVerifyTarget.trim().toLowerCase();
+    const matchingClaim = sortedClaims.find(
+      (claim) => claim.text?.trim().toLowerCase() === t
+    );
+
+    if (
+      matchingClaim &&
+      (matchingClaim.status === "matched" ||
+        matchingClaim.status === "disputed" ||
+        matchingClaim.status === "no_match" ||
+        matchingClaim.status === "error")
+    ) {
+      setDashboardVerifyTarget("");
+    }
+  }, [dashboardVerifyTarget, sortedClaims]);
 
   useEffect(() => {
     setExpandedFamilies((prev) => {
@@ -546,13 +842,27 @@ export default function ClashBotSheet({
     });
   }, [familyViews]);
 
-  const titleText = mode === "quick_verify" ? "Quick Verify" : "ClashBot Dashboard";
+  const titleText =
+    mode === "quick_verify" ? "Quick Verify" : "ClashBot Dashboard";
 
   function handleSubmit() {
     const text = draft.trim();
     if (!text) return;
+
+    if (mode === "dashboard" && onDashboardSubmit) {
+      onDashboardSubmit(text);
+      setDraft("");
+      Keyboard.dismiss();
+      return;
+    }
+
+    if (mode === "dashboard") {
+      setDashboardVerifyTarget(text);
+    }
+
     onSubmitClaim(text);
     setDraft("");
+    Keyboard.dismiss();
   }
 
   function toggleFamily(familyId: string) {
@@ -585,11 +895,26 @@ export default function ClashBotSheet({
     const meaningfulTokensCount = Array.isArray(claim.claimDna?.meaningfulTokens)
       ? claim.claimDna?.meaningfulTokens.length
       : 0;
-    const additionalSourceCount = Array.isArray(verification?.matches)
-      ? Math.min(verification.matches.length - 1, 3)
-      : 0;
-    const statusBadge = getStatusBadge(claim.status, claim.verification?.stance, claim.verification?.reasonCode);
-    const helperText = getReasonCodeHelperText(statusBadge.reasonCode);
+
+    const statusBadge = getStatusBadge(
+      effectiveDisplayStatus(claim),
+      claim.verification?.stance,
+      claim.verification?.reasonCode
+    );
+
+    const { representativeCount: cardRepCount } = clusterEvidence(
+      verification?.matches
+    );
+    const evidenceReps = getEvidenceRepresentatives(verification);
+
+    const helperText =
+      getResultExplanation({
+        status: claim.status,
+        stance: claim.verification?.stance,
+        reasonCode: statusBadge.reasonCode,
+        confidenceTier: claim.verification?.confidenceTier,
+        representativeCount: cardRepCount,
+      }) ?? getReasonCodeHelperText(statusBadge.reasonCode);
 
     return (
       <View
@@ -605,7 +930,10 @@ export default function ClashBotSheet({
           </View>
 
           {topMatch?.url ? (
-            <Pressable onPress={() => openLink(topMatch.url)} style={styles.receiptsButton}>
+            <Pressable
+              onPress={() => openLink(topMatch.url)}
+              style={styles.receiptsButton}
+            >
               <Text style={styles.receiptsButtonText}>Receipts</Text>
             </Pressable>
           ) : null}
@@ -650,8 +978,8 @@ export default function ClashBotSheet({
                 claim.status === "checking"
                   ? styles.timelineStepActive
                   : timeline.checking
-                  ? styles.timelineStepDone
-                  : styles.timelineStepIdle,
+                    ? styles.timelineStepDone
+                    : styles.timelineStepIdle,
               ]}
             >
               <Text
@@ -660,8 +988,8 @@ export default function ClashBotSheet({
                   claim.status === "checking"
                     ? styles.timelineStepTextActive
                     : timeline.checking
-                    ? styles.timelineStepTextDone
-                    : styles.timelineStepTextIdle,
+                      ? styles.timelineStepTextDone
+                      : styles.timelineStepTextIdle,
                 ]}
               >
                 Checking
@@ -688,13 +1016,14 @@ export default function ClashBotSheet({
               <Text
                 style={[
                   styles.timelineStepText,
-                  claim.status === "matched"
+                  effectiveDisplayStatus(claim) === "matched"
                     ? styles.timelineStepTextDone
-                    : claim.status === "disputed" || claim.status === "error"
-                    ? styles.timelineStepTextNegative
-                    : timeline.result
-                    ? styles.timelineStepTextNeutral
-                    : styles.timelineStepTextIdle,
+                    : effectiveDisplayStatus(claim) === "disputed" ||
+                        effectiveDisplayStatus(claim) === "error"
+                      ? styles.timelineStepTextNegative
+                      : timeline.result
+                        ? styles.timelineStepTextNeutral
+                        : styles.timelineStepTextIdle,
                 ]}
               >
                 {getTimelineResultLabel(claim)}
@@ -714,10 +1043,40 @@ export default function ClashBotSheet({
 
           {!!verification?.mode && (
             <Text style={styles.verdictMetaText}>
-              {verification.mode === "fact_check" ? "Fact Check" : "Recent Coverage"}
+              {verification.mode === "fact_check"
+                ? "Fact Check"
+                : "Recent Coverage"}
             </Text>
           )}
         </View>
+
+        {!!verification?.confidenceTier && (
+          <View style={styles.confidenceStrip}>
+            <View
+              style={[
+                styles.confidenceTierBadge,
+                verification.confidenceTier === "high"
+                  ? styles.confidenceTierHigh
+                  : verification.confidenceTier === "medium"
+                    ? styles.confidenceTierMedium
+                    : verification.confidenceTier === "low"
+                      ? styles.confidenceTierLow
+                      : styles.confidenceTierNone,
+              ]}
+            >
+              <Text style={styles.confidenceTierText}>
+                {verification.confidenceTier.charAt(0).toUpperCase() +
+                  verification.confidenceTier.slice(1)}{" "}
+                confidence
+              </Text>
+            </View>
+            {verification.confidenceScore != null && (
+              <Text style={styles.confidenceScoreText}>
+                {verification.confidenceScore}/100
+              </Text>
+            )}
+          </View>
+        )}
 
         <View style={styles.debugCard}>
           <View style={styles.debugHeaderRow}>
@@ -746,7 +1105,9 @@ export default function ClashBotSheet({
             <View style={styles.debugItem}>
               <Text style={styles.debugLabel}>Derived From</Text>
               <Text style={styles.debugValue}>
-                {claim.derivedFromClaimId ? getShortId(claim.derivedFromClaimId, 16) : "—"}
+                {claim.derivedFromClaimId
+                  ? getShortId(claim.derivedFromClaimId, 16)
+                  : "—"}
               </Text>
             </View>
           </View>
@@ -780,6 +1141,17 @@ export default function ClashBotSheet({
 
         {__DEV__ && <VerificationTracePanel claim={claim} />}
 
+        {claim.status === "no_match" && !!claim.suggestedText && (
+          <Pressable
+            onPress={() => onSubmitClaim(claim.suggestedText!)}
+            style={styles.suggestionChip}
+          >
+            <Text style={styles.suggestionChipText}>
+              Did you mean: {claim.suggestedText}?
+            </Text>
+          </Pressable>
+        )}
+
         {!!verification && (
           <>
             <View style={styles.metaRow}>
@@ -806,88 +1178,80 @@ export default function ClashBotSheet({
               <Text style={styles.evidenceSummaryText}>{evidenceSummary}</Text>
             )}
 
-            {!!topMatch?.title && (
-              <>
-                <Text style={styles.primarySourceLabel}>Primary source</Text>
-                <Text style={styles.sourceTitleText} numberOfLines={2}>
-                  {topMatch.title}
+            {!!topMatch && (
+              <Pressable
+                onPress={topMatch.url ? () => openLink(topMatch.url) : undefined}
+                style={styles.topSourceCard}
+              >
+                <Text style={styles.sourceItemTitle} numberOfLines={2}>
+                  {topMatch.title || topMatch.claimReviewed || "Top source"}
                 </Text>
-              </>
-            )}
-
-            {!!topMatch?.rating?.text && (
-              <Text style={styles.ratingText}>{topMatch.rating.text}</Text>
-            )}
-
-            {!!topMatch?.snippet && (
-              <Text style={styles.snippetText} numberOfLines={4}>
-                {topMatch.snippet}
-              </Text>
-            )}
-
-            {!!topMatch?.url && (
-              <Pressable onPress={() => openLink(topMatch.url)}>
-                <Text style={styles.linkText}>
-                  {topMatch.publisher
-                    ? `Open ${topMatch.publisher} →`
-                    : "Open source →"}
-                </Text>
+                {!!topMatch.publisher && (
+                  <Text style={styles.sourceItemPublisher}>
+                    {topMatch.publisher}
+                  </Text>
+                )}
+                {!!(topMatch.rating?.text || topMatch.rating?.raw) && (
+                  <Text style={styles.sourceItemRating}>
+                    {topMatch.rating?.text || topMatch.rating?.raw}
+                  </Text>
+                )}
+                {!!topMatch.url && (
+                  <Text style={styles.sourceItemTap}>Open source →</Text>
+                )}
               </Pressable>
             )}
 
-            {Array.isArray(verification?.matches) && verification.matches.length > 1 && (
-              <View style={styles.sourcesBlock}>
-                <Text style={styles.sourcesTitle}>
-                  {additionalSourceCount === 1 ? "1 more source" : `${additionalSourceCount} more sources`}
-                </Text>
+            {evidenceReps.length > 0 && (
+              <View style={styles.evidencePreview}>
+                {evidenceReps.map((rep, idx) => {
+                  const repDate =
+                    formatEvidenceDate(rep.claimDate, verification?.mode) ?? undefined;
+                  const repMeta = [rep.publisher, repDate].filter(Boolean).join(" · ");
+                  const repRating = rep.rating?.text ?? rep.rating?.raw ?? null;
 
-                {verification.matches
-                  .slice(1, 4)
-                  .map((m: FactCheckMatch, idx: number) => (
+                  return (
                     <Pressable
-                      key={`${claim.id}-src-${idx}`}
-                      onPress={() => openLink(m.url)}
+                      key={`${claim.id}-rep-${idx}`}
+                      onPress={rep.url ? () => openLink(rep.url) : undefined}
                       style={styles.sourceItem}
                     >
                       <View style={styles.sourceItemTopRow}>
                         <Text style={styles.sourceItemTitle} numberOfLines={2}>
-                          {m.title || "Source"}
+                          {rep.title || rep.claimReviewed || "Source"}
                         </Text>
 
-                        {!!m.provider && (
+                        {!!rep.provider && (
                           <View style={styles.miniSourceBadge}>
                             <Text style={styles.miniSourceBadgeText}>
-                              {m.provider === "google_factcheck"
-                                ? "Fact Check"
-                                : m.provider === "known_fact_override"
-                                ? "Known Fact"
-                                : m.provider === "bing_news" || m.provider === "newsapi"
-                                ? "Coverage"
-                                : "Source"}
+                              {getEvidenceProviderLabel(rep.provider)}
                             </Text>
                           </View>
                         )}
                       </View>
 
-                      {!!m.publisher && (
+                      {!!repMeta && (
                         <Text style={styles.sourceItemPublisher} numberOfLines={1}>
-                          {m.publisher}
+                          {repMeta}
                         </Text>
                       )}
 
-                      {!!m.rating?.text && (
+                      {!!repRating && (
                         <Text style={styles.sourceItemRating} numberOfLines={1}>
-                          {m.rating.text}
+                          {repRating}
                         </Text>
                       )}
 
-                      {!!m.url && (
+                      {!!rep.url && (
                         <Text style={styles.sourceItemTap}>
-                          {m.publisher ? `Open ${m.publisher} →` : "Open source →"}
+                          {rep.publisher
+                            ? `Open ${rep.publisher} →`
+                            : "Open source →"}
                         </Text>
                       )}
                     </Pressable>
-                  ))}
+                  );
+                })}
               </View>
             )}
           </>
@@ -900,13 +1264,20 @@ export default function ClashBotSheet({
 
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
-      <View style={styles.backdrop}>
-        <Pressable style={{ flex: 1 }} onPress={onClose} />
+      <View style={styles.backdropPressable} />
 
+      <KeyboardAvoidingView
+        style={styles.sheetLayer}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        pointerEvents="box-none"
+      >
         <View
+          pointerEvents="auto"
           style={[
             styles.sheet,
-            mode === "quick_verify" ? styles.sheetQuickVerify : styles.sheetDashboard,
+            mode === "quick_verify"
+              ? styles.sheetQuickVerify
+              : styles.sheetDashboard,
           ]}
         >
           <View style={styles.handle} />
@@ -925,21 +1296,65 @@ export default function ClashBotSheet({
           {mode === "dashboard" ? (
             <View style={styles.inputRow}>
               <TextInput
+                ref={inputRef}
                 value={draft}
                 onChangeText={setDraft}
                 placeholder="Type a claim..."
                 placeholderTextColor="rgba(15, 23, 42, 0.45)"
-                style={styles.input}
+                style={[
+                  styles.input,
+                  Platform.OS === "android" && { includeFontPadding: false },
+                ]}
                 onSubmitEditing={handleSubmit}
                 returnKeyType="done"
+                onFocus={() => console.log("[ClashBot] input focused")}
+                onBlur={() => console.log("[ClashBot] input blurred")}
               />
 
               <Pressable onPress={handleSubmit} style={styles.verifyButton}>
                 <Text style={styles.verifyButtonText}>Verify</Text>
               </Pressable>
             </View>
-          ) : (
-            <QuickVerifyStatus claims={sortedClaims} />
+          ) : null}
+
+          {draftSuggestion ? (
+            <Pressable
+              onPress={() => {
+                setDraft(draftSuggestion);
+                inputRef.current?.focus();
+              }}
+              style={styles.suggestionChip}
+            >
+              <Text style={styles.suggestionChipText}>
+                Did you mean: {draftSuggestion}?
+              </Text>
+            </Pressable>
+          ) : null}
+
+          {mode === "dashboard" &&
+            draft.trim().length === 0 &&
+            (dashboardVerifyTarget ||
+              latestDashboardClaim?.status === "queued" ||
+              latestDashboardClaim?.status === "checking") && (
+              <QuickVerifyStatus
+                claims={sortedClaims}
+                compact
+                quickVerifyTarget={dashboardVerifyTarget || undefined}
+              />
+            )}
+
+          {mode === "dashboard" ? null : (
+            <ScrollView
+              style={styles.quickVerifyScroll}
+              contentContainerStyle={styles.quickVerifyScrollContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              <QuickVerifyStatus
+                claims={sortedClaims}
+                quickVerifyTarget={quickVerifyTarget}
+              />
+            </ScrollView>
           )}
 
           {mode === "dashboard" ? (
@@ -997,7 +1412,10 @@ export default function ClashBotSheet({
                         </Text>
 
                         {!!latestFamilyEvent && (
-                          <Text style={styles.familyLatestEventText} numberOfLines={2}>
+                          <Text
+                            style={styles.familyLatestEventText}
+                            numberOfLines={2}
+                          >
                             Latest Event: {formatEventType(latestFamilyEvent.type)}
                             {latestFamilyEvent.message
                               ? ` - ${latestFamilyEvent.message}`
@@ -1019,14 +1437,18 @@ export default function ClashBotSheet({
                         <View style={styles.familyBody}>
                           {family.totalClaims > 1 && (
                             <View style={styles.familySection}>
-                              <Text style={styles.familySectionTitle}>Lead claim</Text>
+                              <Text style={styles.familySectionTitle}>
+                                Lead claim
+                              </Text>
                               {renderClaimCard(family.leadClaim, { nested: true })}
                             </View>
                           )}
 
                           {family.totalClaims > 1 && (
                             <View style={styles.familySection}>
-                              <Text style={styles.familySectionTitle}>Related claims</Text>
+                              <Text style={styles.familySectionTitle}>
+                                Related claims
+                              </Text>
                               {family.claims
                                 .filter((claim) => claim.id !== family.leadClaimId)
                                 .map((claim) =>
@@ -1062,15 +1484,19 @@ export default function ClashBotSheet({
             </ScrollView>
           ) : null}
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  backdrop: {
+  backdropPressable: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "rgba(2, 8, 23, 0.55)",
+  },
+
+  sheetLayer: {
+    ...StyleSheet.absoluteFillObject,
     justifyContent: "flex-end",
   },
 
@@ -1084,9 +1510,15 @@ const styles = StyleSheet.create({
   },
 
   sheetQuickVerify: {
-    // No TextInput in quick_verify mode — height is determined by
-    // handle + header + QuickVerifyStatus card only (~190px).
-    maxHeight: 210,
+    maxHeight: "62%",
+  },
+
+  quickVerifyScroll: {
+    maxHeight: "100%",
+  },
+
+  quickVerifyScrollContent: {
+    paddingBottom: 12,
   },
 
   quickStatusCard: {
@@ -1098,20 +1530,34 @@ const styles = StyleSheet.create({
     borderColor: "rgba(15, 23, 42, 0.12)",
     gap: 8,
   },
+
   quickStatusText: {
     fontSize: 14,
     fontWeight: "700",
     color: "rgba(11, 23, 35, 0.70)",
   },
+
+  quickStatusExplanation: {
+    fontSize: 15,
+    lineHeight: 21,
+    fontWeight: "800",
+    color: "rgba(15, 23, 42, 0.82)",
+  },
+
   quickStatusClaimText: {
     fontSize: 14,
     fontWeight: "700",
     color: "#0b1723",
     lineHeight: 19,
   },
+
   quickStatusHint: {
     fontSize: 12,
     color: "rgba(11, 23, 35, 0.55)",
+  },
+
+  quickEvidenceWrap: {
+    marginTop: 4,
   },
 
   sheetDashboard: {
@@ -1490,17 +1936,18 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    marginBottom: 12,
+    marginBottom: 16,
+    marginTop: 4,
   },
 
   verdictBadge: {
     borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
+    paddingHorizontal: 16,
+    paddingVertical: 9,
   },
 
   verdictBadgeText: {
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: "900",
     letterSpacing: 0.2,
   },
@@ -1530,9 +1977,50 @@ const styles = StyleSheet.create({
   },
 
   verdictMetaText: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: "800",
     color: "rgba(15, 23, 42, 0.52)",
+  },
+
+  confidenceStrip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 12,
+  },
+
+  confidenceTierBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+
+  confidenceTierHigh: {
+    backgroundColor: "rgba(36,230,184,0.14)",
+  },
+
+  confidenceTierMedium: {
+    backgroundColor: "rgba(245,166,35,0.14)",
+  },
+
+  confidenceTierLow: {
+    backgroundColor: "rgba(255,77,77,0.12)",
+  },
+
+  confidenceTierNone: {
+    backgroundColor: "rgba(15,23,42,0.08)",
+  },
+
+  confidenceTierText: {
+    fontSize: 11,
+    fontWeight: "900",
+    color: "rgba(15,23,42,0.72)",
+  },
+
+  confidenceScoreText: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: "rgba(15,23,42,0.45)",
   },
 
   debugCard: {
@@ -1663,58 +2151,20 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
 
-  primarySourceLabel: {
-    fontSize: 10,
-    fontWeight: "700",
-    letterSpacing: 0.8,
-    color: "#22d3ee",
-    textTransform: "uppercase",
-    marginBottom: 4,
-  },
-  sourceTitleText: {
-    fontSize: 15,
-    lineHeight: 22,
-    fontWeight: "800",
-    color: "#102232",
-    marginBottom: 8,
-  },
-
-  ratingText: {
-    fontSize: 13,
-    lineHeight: 19,
-    fontWeight: "900",
-    color: "#0b6b7d",
-    marginBottom: 8,
-  },
-
-  snippetText: {
-    fontSize: 13,
-    lineHeight: 20,
-    fontWeight: "700",
-    color: "rgba(15, 23, 42, 0.72)",
-    marginBottom: 8,
-  },
-
-  linkText: {
-    fontSize: 15,
-    lineHeight: 22,
-    fontWeight: "800",
-    color: "#0e95b8",
-    marginBottom: 8,
-  },
-
-  sourcesBlock: {
+  evidencePreview: {
     marginTop: 10,
     paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: "rgba(15, 23, 42, 0.08)",
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: "rgba(15, 23, 42, 0.1)",
   },
 
-  sourcesTitle: {
-    fontSize: 14,
-    fontWeight: "900",
-    color: "#132230",
-    marginBottom: 8,
+  topSourceCard: {
+    backgroundColor: "rgba(255,255,255,0.92)",
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "rgba(34,211,238,0.22)",
   },
 
   sourceItem: {
@@ -1790,5 +2240,20 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: "#334155",
     marginBottom: 8,
+  },
+
+  suggestionChip: {
+    marginTop: 12,
+    backgroundColor: "rgba(47, 211, 245, 0.14)",
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    alignSelf: "flex-start",
+  },
+
+  suggestionChipText: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: "#0b6b7d",
   },
 });

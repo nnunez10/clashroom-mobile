@@ -6,6 +6,7 @@ import { areClaimsInSameFamily, getClaimDna } from "./claimDna";
 import { Claim, claimFingerprint, extractClaimsFromLine } from "./extractClaims";
 import { findKnownFactOverride } from "./knownFacts";
 import { startMockTranscriptStream } from "./mockStream";
+import { normalizeClaimInput, suggestTypoCorrection } from "./normalizeInput";
 import {
   assessRelevance,
   buildCandidateText,
@@ -89,6 +90,10 @@ type EngineClaim = Omit<Claim, "verification"> & {
     checkingAt?: number;
     completedAt?: number;
   };
+  /** Surface-cleaned version of text used for API queries and matching. */
+  normalizedText?: string;
+  /** Typo-corrected suggestion, set only on no_match results. Never auto-applied. */
+  suggestedText?: string;
   claimDna?: ReturnType<typeof getClaimDna>;
   fingerprint?: string;
   familyId?: string;
@@ -138,6 +143,10 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
 
   const [transcript, setTranscript] = useState<string[]>([]);
   const [claims, setClaims] = useState<EngineClaim[]>([]);
+  // Synchronous mirror of claims state — kept fresh on every render so
+  // submitDirectClaim can read current claims without capturing a stale closure.
+  const claimsRef = useRef<EngineClaim[]>([]);
+  claimsRef.current = claims;
 
   // Maps fingerprint → timestamp (ms) of first submission this session.
   // Claims whose entry is older than SEEN_CLAIM_COOLDOWN_MS are eligible for re-verification.
@@ -297,6 +306,113 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
     [demoMode]
   );
 
+  // Direct claim submission — bypasses NLP extraction scoring so that text
+  // explicitly submitted by the user is always queued for verification,
+  // regardless of how "claim-like" the heuristics would score it.
+  const submitDirectClaim = useCallback(
+    (text: string) => {
+      const { raw, normalized } = normalizeClaimInput(String(text || ""));
+      if (!raw) return;
+
+      const ts = Date.now();
+
+      setTranscript((prev) => [raw, ...prev].slice(0, 10));
+
+      // Use normalized text for DNA / fingerprinting so that minor typing
+      // noise ("teh earth is flat" vs "the earth is flat") maps to the same
+      // family.  raw is preserved for display; normalized goes to the API.
+      const claimId = makeId("claim", `${normalized}_${ts}`);
+      const fp = claimFingerprint(normalized);
+      const dna = getClaimDna(normalized);
+
+      // All acceptance decisions are made here, outside the updater, so the
+      // updater stays pure. claimsRef.current is a synchronous snapshot of the
+      // current claims state — safe to read in a single-threaded event handler.
+      const seenAt = seenClaimsRef.current.get(fp);
+      if (seenAt !== undefined && ts - seenAt < SEEN_CLAIM_COOLDOWN_MS) return;
+
+      const existingFamily =
+        familyRegistryRef.current.find((entry) =>
+          areClaimsInSameFamily(entry.seedText, normalized)
+        ) || null;
+
+      const resolvedFamilyId = existingFamily?.familyId || dna.familyId;
+      const parentClaimId =
+        existingFamily?.leadClaimId ||
+        familyClaimIdMapRef.current.get(resolvedFamilyId) ||
+        null;
+
+      // Acceptance gate: read current claims via ref before committing any mutations.
+      const familyHasActiveClaim = claimsRef.current.some(
+        (existing) =>
+          existing.familyId === resolvedFamilyId &&
+          (existing.status === "queued" || existing.status === "checking")
+      );
+      if (familyHasActiveClaim) return;
+
+      // Accepted — commit side effects only now, after the gate has passed.
+      seenClaimsRef.current.set(fp, ts);
+
+      if (!existingFamily) {
+        familyRegistryRef.current.push({
+          familyId: resolvedFamilyId,
+          leadClaimId: claimId,
+          seedText: normalized,
+        });
+      }
+
+      if (!familyClaimIdMapRef.current.has(resolvedFamilyId)) {
+        familyClaimIdMapRef.current.set(resolvedFamilyId, claimId);
+      }
+
+      // raw → displayed to user; normalized → sent to API and used for matching
+      const c = { id: claimId, text: raw, ts };
+
+      const seededClaim: EngineClaim = {
+        ...c,
+        normalizedText: normalized !== raw ? normalized : undefined,
+        createdAt: ts,
+        status: "queued",
+        fingerprint: dna.fingerprint,
+        claimDna: {
+          ...dna,
+          familyId: resolvedFamilyId,
+        },
+        familyId: resolvedFamilyId,
+        derivedFromClaimId: parentClaimId,
+        evidence: [],
+        events: [],
+        timeline: {
+          queuedAt: ts,
+        },
+      };
+
+      seededClaim.events = appendClaimEvent(
+        seededClaim,
+        "claim_detected",
+        ts,
+        existingFamily
+          ? "Related claim detected and attached to existing claim family."
+          : "Claim submitted directly by user.",
+        { text: raw, familyId: resolvedFamilyId, derivedFromClaimId: parentClaimId }
+      );
+
+      seededClaim.events = appendClaimEvent(
+        seededClaim,
+        "claim_queued",
+        ts,
+        "Claim added to verification queue.",
+        { text: raw, familyId: resolvedFamilyId, derivedFromClaimId: parentClaimId }
+      );
+
+      // Pure updater: no side effects, just the array insertion.
+      setClaims((prev) => [seededClaim, ...prev].slice(0, 20));
+
+      setLastClaimAt(ts);
+    },
+    [demoMode]
+  );
+
   useEffect(() => {
     if (!demoMode) return;
 
@@ -318,7 +434,9 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
     if (!nextQueued) return;
 
     const claimId = nextQueued.id;
-    const claimText = nextQueued.text;
+    // Use the surface-cleaned version for API queries when available;
+    // fall back to raw text so the original claim is still verifiable.
+    const claimText = nextQueued.normalizedText ?? nextQueued.text;
     const startedAt = Date.now();
 
     verifyingRef.current = true;
@@ -406,10 +524,11 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
                 result,
                 assessment,
                 "unclear",
-                mode
+                mode,
+                claimText
               );
 
-              const evidence = buildEvidenceFromResult(result, "unclear", completedAt);
+              const evidence = buildEvidenceFromResult(result, "unclear", completedAt, claimText);
 
               return withTimeline(c, {
                 status: "disputed",
@@ -441,7 +560,7 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
                   mode
                 );
 
-                const evidence = buildEvidenceFromResult(result, stance, completedAt);
+                const evidence = buildEvidenceFromResult(result, stance, completedAt, claimText);
 
                 return withTimeline(c, {
                   status: "disputed",
@@ -470,7 +589,7 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
                   mode
                 );
 
-                const evidence = buildEvidenceFromResult(result, stance, completedAt);
+                const evidence = buildEvidenceFromResult(result, stance, completedAt, claimText);
 
                 return withTimeline(c, {
                   status: "matched",
@@ -495,13 +614,21 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
                 result,
                 assessment,
                 stance,
-                mode
+                mode,
+                claimText
               );
 
-              const evidence = buildEvidenceFromResult(result, stance, completedAt);
+              const evidence = buildEvidenceFromResult(result, stance, completedAt, claimText);
+
+              const claimStatus =
+                stance === "supported"
+                  ? "matched"
+                  : stance === "contradicted"
+                  ? "disputed"
+                  : "disputed";
 
               return withTimeline(c, {
-                status: "matched",
+                status: claimStatus,
                 verification,
                 evidence,
                 completedAt,
@@ -524,14 +651,17 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
                 result,
                 assessment,
                 "unclear",
-                mode
+                mode,
+                claimText
               );
+              const suggestion = suggestTypoCorrection(c.text);
 
               return withTimeline(c, {
                 status: "no_match",
                 verification,
                 evidence: [],
                 completedAt,
+                suggestedText: suggestion ?? undefined,
                 events: appendClaimEvent(
                   c,
                   "claim_no_match",
@@ -546,7 +676,8 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
               result,
               assessment,
               "unclear",
-              mode
+              mode,
+              claimText
             );
 
             return withTimeline(c, {
@@ -614,5 +745,6 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
     activeClaimsCount,
     bubbleIsChecking,
     pushTranscriptLine,
+    submitDirectClaim,
   };
 }

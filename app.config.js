@@ -124,6 +124,7 @@ module.exports = ({ config }) => {
 
     // Future options (safe to leave blank until needed):
     BING_NEWS_API_KEY: env("BING_NEWS_API_KEY"),
+    TAVILY_API_KEY: env("TAVILY_API_KEY"),
     SERPAPI_KEY: env("SERPAPI_KEY"),
     BRAVE_SEARCH_API_KEY: env("BRAVE_SEARCH_API_KEY"),
     EXA_API_KEY: env("EXA_API_KEY"),

@@ -139,6 +139,10 @@ const SUPPORT_PHRASES = [
   "supported",
 ];
 
+// Negation words filtered out by meaningfulTokens (stop words / short tokens).
+// Used separately to detect polarity flips between user claim and reviewed claim.
+const NEGATION_RE = /\b(not|no|never|cannot|can't|doesn't|don't|isn't|aren't|wasn't|weren't|won't)\b/i;
+
 function meaningfulTokens(s: string): string[] {
   return tokenizeLower(s).filter((t) => t.length >= 4 && !STOP.has(t));
 }
@@ -236,15 +240,62 @@ function matchQualityScore(m: any): number {
   const provider = safeString(m?.provider) || "unknown";
   let score = (3 - providerRank(provider)) * 20;
   if (safeString(m?.rating?.text)) score += 10;
+  else if (provider === "bing_news" || provider === "newsapi") score -= 10; // coverage without verdict = weak signal
   if (safeString(m?.url)) score += 5;
   if (safeString(m?.publisher)) score += 3;
   if (safeString(m?.title)) score += 2;
   return score;
 }
 
-function pickTopMatch(matches: any[] | undefined): any | undefined {
+// Claim-aware match scorer: extends matchQualityScore with token-overlap relevance
+// and source recency. Used when claimText is available so the best `top` result
+// is the one most directly about the claim, not just the most authoritative source.
+//
+// Relevance bonus: up to +20 (4 pts per shared meaningful token, capped)
+// Recency bonus:   +10 today, +7 within a week, +4 within a month, +2 within a year
+function scoreMatchForClaim(claimText: string, m: any): number {
+  let score = matchQualityScore(m);
+
+  // Relevance: token overlap between claim and all text fields on the match
+  const matchText = [
+    safeString(m?.claim),
+    safeString(m?.claimReviewed),
+    safeString(m?.title),
+    safeString(m?.text),
+    safeString(m?.snippet),
+  ].filter(Boolean).join(" ");
+  const claimTokens = meaningfulTokens(claimText);
+  const matchTokens = meaningfulTokens(matchText);
+  if (claimTokens.length > 0 && matchTokens.length > 0) {
+    const overlap = setOverlapCount(claimTokens, matchTokens);
+    score += Math.min(overlap * 4, 20);
+  }
+
+  // Recency: newer sources score higher.
+  // Weights are doubled vs. the old values so that a same-day, fully-relevant
+  // news article can compete with an older authoritative source (provider gap
+  // between google_factcheck and newsapi is ~20 pts; old max was only +10).
+  const claimDate = safeString(m?.claimDate);
+  if (claimDate) {
+    const ms = Date.parse(claimDate);
+    if (Number.isFinite(ms)) {
+      const ageDays = Math.floor((Date.now() - ms) / 86_400_000);
+      if (ageDays === 0)       score += 20; // was 10 — strong
+      else if (ageDays <= 7)   score += 14; // was  7 — high
+      else if (ageDays <= 30)  score +=  8; // was  4 — medium
+      else if (ageDays <= 365) score +=  4; // was  2 — minimal
+    }
+  }
+
+  return score;
+}
+
+function pickTopMatch(matches: any[] | undefined, claimText?: string): any | undefined {
   if (!Array.isArray(matches) || matches.length === 0) return undefined;
-  return [...matches].sort((a, b) => matchQualityScore(b) - matchQualityScore(a))[0];
+  const scoreFn = claimText
+    ? (m: any) => scoreMatchForClaim(claimText, m)
+    : matchQualityScore;
+  return [...matches].sort((a, b) => scoreFn(b) - scoreFn(a))[0];
 }
 
 function normalizeMode(
@@ -305,6 +356,25 @@ export function assessRelevance(
   const hasAnchors = claimNums.length > 0 || claimEnts.length > 0;
 
   if (hasAnchors) {
+    // recent_coverage entity gate: if the claim names a person, organization, or
+    // other entity, the article must mention that entity. A shared number alone
+    // (e.g. a year, a percentage that coincidentally matches) is not sufficient —
+    // the article could be about a completely different event or actor.
+    if (mode === "recent_coverage" && claimEnts.length > 0) {
+      const matchToks = new Set(meaningfulTokens(matchText));
+      const entityShared =
+        sharedEnts >= 1 ||
+        claimEnts.some((e) =>
+          e.split(/\s+/).filter(Boolean).every((w) => matchToks.has(w))
+        );
+      if (!entityShared) {
+        return {
+          relevant: false,
+          reason: "Recent coverage does not mention the key entity in the claim.",
+        };
+      }
+    }
+
     if (sharedNums >= 1 || sharedEnts >= 1) {
       return {
         relevant: true,
@@ -350,7 +420,10 @@ export function assessRelevance(
   const overlap = shared / Math.max(1, Math.min(a.length, b.length));
 
   if (mode === "recent_coverage") {
-    if (shared >= 2 || overlap >= 0.18) {
+    // Stricter than fact_check: no named-entity anchor means the claim is
+    // likely dynamic/current-event, so generic token coincidence is high-risk.
+    // Require ≥3 shared tokens OR ≥30% overlap (up from 2 / 18%).
+    if (shared >= 3 || overlap >= 0.30) {
       return {
         relevant: true,
         reason: "Recent coverage appears meaningfully related to the claim.",
@@ -396,16 +469,38 @@ export function classifyClaimStance(
   const matches: any[] = Array.isArray(result?.matches) ? result.matches : [];
   let contradictionScore = 0;
   let supportScore = 0;
+  const userMeaningfulTokens = new Set(meaningfulTokens(claimText));
 
   for (const m of matches) {
     const ratingText = safeString(m?.rating?.text).toLowerCase();
     if (!ratingText) continue;
     const weight =
-      m?.provider === "google_factcheck" || m?.provider === "known_fact_override" ? 2 : 1;
+      m?.provider === "google_factcheck" || m?.provider === "known_fact_override" ? 3 : 1;
+
+    // Polarity check: if the fact-checked claim is the contrary proposition to the user's
+    // claim — same subject tokens but different predicate tokens on each side — then invert
+    // the vote. A "False" rating on "earth is flat" supports "earth is round", not contradicts.
+    //
+    // Negation flip: "not" is a stop word so meaningfulTokens strips it, making
+    // "wall is visible" and "wall is NOT visible" token-identical. Check negation
+    // presence separately so a "True" rating on "wall is NOT visible from space"
+    // correctly contradicts the user's claim "wall is visible from space".
+    const reviewedText = safeString(m?.claimReviewed || m?.claim);
+    const reviewTokens = reviewedText ? new Set(meaningfulTokens(reviewedText)) : null;
+    const hasSharedSubject =
+      reviewTokens !== null && [...userMeaningfulTokens].some((t) => reviewTokens.has(t));
+    const hasTokenDiff =
+      reviewTokens !== null &&
+      [...userMeaningfulTokens].some((t) => !reviewTokens.has(t)) &&
+      [...reviewTokens].some((t) => !userMeaningfulTokens.has(t));
+    const negationFlip =
+      NEGATION_RE.test(claimText) !== (reviewedText ? NEGATION_RE.test(reviewedText) : false);
+    const contrary = hasSharedSubject && (hasTokenDiff || negationFlip);
+
     if (countPhraseHits(ratingText, CONTRADICTION_PHRASES) > 0) {
-      contradictionScore += weight;
+      contrary ? (supportScore += weight) : (contradictionScore += weight);
     } else if (countPhraseHits(ratingText, SUPPORT_PHRASES) > 0) {
-      supportScore += weight;
+      contrary ? (contradictionScore += weight) : (supportScore += weight);
     }
   }
 
@@ -544,7 +639,7 @@ export function computeConfidence(
   const isAuthoritative =
     topProvider === "google_factcheck" || topProvider === "known_fact_override";
   if (stance === "contradicted" || stance === "supported") {
-    score += isAuthoritative ? 25 : 15;
+    score += isAuthoritative ? 25 : 8;
   }
 
   // Relevance
@@ -585,6 +680,74 @@ export function computeConfidence(
   return { confidenceScore: score, confidenceTier };
 }
 
+/**
+ * Counts supporting, contradicting, and neutral sources from raw matches[].
+ * Uses the same phrase arrays as classifyClaimStance so counts stay consistent
+ * with the upstream stance derivation — no new NLP work added here.
+ */
+export function summarizeEvidence(matches: any[]): {
+  supporting: number;
+  contradicting: number;
+  neutral: number;
+} {
+  let supporting = 0;
+  let contradicting = 0;
+  let neutral = 0;
+  for (const m of Array.isArray(matches) ? matches : []) {
+    const r = safeString(m?.rating?.text).toLowerCase();
+    if (!r) { neutral++; continue; }
+    if (countPhraseHits(r, CONTRADICTION_PHRASES) > 0) contradicting++;
+    else if (countPhraseHits(r, SUPPORT_PHRASES) > 0) supporting++;
+    else neutral++;
+  }
+  return { supporting, contradicting, neutral };
+}
+
+// Short count-based sentence attached to every VerificationResult at build time.
+// Distinct from getResultExplanation (UI layer) which uses stance/reasonCode/tier.
+function buildExplanation(supporting: number, contradicting: number): string {
+  const rated = supporting + contradicting;
+  if (rated === 0) return "No verdict signals found in available sources.";
+  if (supporting > 0 && contradicting > 0) {
+    return `${supporting} source${supporting !== 1 ? "s" : ""} support and ${contradicting} contradict — verdict unclear.`;
+  }
+  if (contradicting > 0) {
+    return `${contradicting} source${contradicting !== 1 ? "s" : ""} contradict this claim.`;
+  }
+  return `${supporting} source${supporting !== 1 ? "s" : ""} support this claim.`;
+}
+
+/**
+ * Generates a short claim-aware summary from all matches.
+ * Uses summarizeEvidence counts — no titles, no headlines, no external calls.
+ *
+ *   No matches                        → "No reliable evidence found."
+ *   contradicting > supporting        → "Current reporting does not support this claim."
+ *   supporting > contradicting        → "Available sources support this claim."
+ *   both present (tied or mixed)      → "Sources show mixed or unclear information."
+ *   only generic coverage (no ratings)→ "Recent coverage does not confirm this claim."
+ */
+export function buildSummary(matches: any[]): string {
+  const all = Array.isArray(matches) ? matches : [];
+  if (all.length === 0) return "No reliable evidence found.";
+
+  const { supporting, contradicting } = summarizeEvidence(all);
+
+  if (supporting === 0 && contradicting === 0) {
+    return "Recent coverage does not confirm this claim.";
+  }
+
+  if (supporting > 0 && contradicting > 0) {
+    return "Sources show mixed or unclear information.";
+  }
+
+  if (contradicting > supporting) {
+    return "Current reporting does not support this claim.";
+  }
+
+  return "Available sources support this claim.";
+}
+
 export function buildOverrideVerification(
   override: ReturnType<typeof findKnownFactOverride>
 ) {
@@ -600,6 +763,12 @@ export function buildOverrideVerification(
   const { confidenceScore, confidenceTier } = computeConfidence(
     overrideStance, "matched", overrideMatchShape, { relevant: true, reason: "Known fact override." }
   );
+  const explanation = override.contradictsClaim
+    ? "Known fact override: this claim is contradicted."
+    : "Known fact override: this claim is supported.";
+  const summary = override.contradictsClaim
+    ? "Sources confirm this claim is contradicted by a known fact."
+    : "Sources confirm this claim is supported by a known fact.";
 
   return {
     status: "matched" as const,
@@ -610,6 +779,8 @@ export function buildOverrideVerification(
       : ("authoritative_support" as const),
     confidenceScore,
     confidenceTier,
+    explanation,
+    summary,
     relevance: {
       relevant: true,
       reason: "Known fact override matched this claim family.",
@@ -651,10 +822,16 @@ export function buildVerificationFromResult(
   result: any,
   assessment: RelevanceAssessment,
   stance: Stance,
-  mode: "fact_check" | "recent_coverage" | undefined
+  mode: "fact_check" | "recent_coverage" | undefined,
+  claimText?: string,
 ): any {
-  const bestTop = pickTopMatch(result?.matches) ?? result?.top;
+  const bestTop = pickTopMatch(result?.matches, claimText) ?? result?.top;
   const topOverride = bestTop !== undefined ? { top: bestTop } : {};
+
+  const _rawMatches: any[] = Array.isArray(result?.matches) ? result.matches : [];
+  const _ev = summarizeEvidence(_rawMatches);
+  const explanation = buildExplanation(_ev.supporting, _ev.contradicting);
+  const summary = buildSummary(_rawMatches);
 
   if (result?.status === "matched" && !assessment.relevant) {
     const { confidenceScore, confidenceTier } = computeConfidence("unclear", "matched", result, assessment);
@@ -665,6 +842,8 @@ export function buildVerificationFromResult(
       reasonCode: deriveReasonCode("unclear", "matched", result, assessment),
       confidenceScore,
       confidenceTier,
+      explanation,
+      summary,
       relevance: assessment,
       message: mergeVerificationMessage(
         result,
@@ -683,6 +862,8 @@ export function buildVerificationFromResult(
         reasonCode: deriveReasonCode(stance, "matched", result, assessment),
         confidenceScore,
         confidenceTier,
+        explanation,
+        summary,
         relevance: assessment,
         message: mergeVerificationMessage(
           result,
@@ -702,6 +883,8 @@ export function buildVerificationFromResult(
         reasonCode: deriveReasonCode(stance, "matched", result, assessment),
         confidenceScore,
         confidenceTier,
+        explanation,
+        summary,
         relevance: assessment,
         message: mergeVerificationMessage(
           result,
@@ -720,6 +903,8 @@ export function buildVerificationFromResult(
       reasonCode: deriveReasonCode(stance, "matched", result, assessment),
       confidenceScore,
       confidenceTier,
+      explanation,
+      summary,
       relevance: assessment,
       message: mergeVerificationMessage(
         result,
@@ -737,6 +922,8 @@ export function buildVerificationFromResult(
       reasonCode: "no_reliable_match" as const,
       confidenceScore: 0,
       confidenceTier: "none" as const,
+      explanation: "No matching source found.",
+      summary: "No reliable evidence found.",
       relevance: {
         relevant: false,
         reason: "No direct matching source was returned.",
@@ -754,6 +941,8 @@ export function buildVerificationFromResult(
     reasonCode: "provider_error" as const,
     confidenceScore: 0,
     confidenceTier: "none" as const,
+    explanation: "Verification could not complete.",
+    summary: "Verification could not complete.",
     relevance: {
       relevant: false,
       reason: "Verification provider failed before a usable result was returned.",
@@ -772,6 +961,8 @@ export function buildExceptionVerification(error: any): {
   reasonCode: "provider_error";
   confidenceScore: 0;
   confidenceTier: "none";
+  explanation: string;
+  summary: string;
   relevance: { relevant: false; reason: string };
   message: string;
 } {
@@ -786,6 +977,8 @@ export function buildExceptionVerification(error: any): {
     reasonCode: "provider_error",
     confidenceScore: 0,
     confidenceTier: "none",
+    explanation: "Verification could not complete.",
+    summary: "Verification could not complete.",
     relevance: {
       relevant: false,
       reason: "Verification request threw an exception.",
@@ -846,9 +1039,10 @@ export function formatEvidenceDate(
 export function buildEvidenceFromResult(
   result: any,
   stance: Stance,
-  capturedAt: number
+  capturedAt: number,
+  claimText?: string,
 ): EvidenceRecord[] {
-  return buildEvidenceFromMatches(result?.matches, result?.mode, stance, capturedAt);
+  return buildEvidenceFromMatches(result?.matches, result?.mode, stance, capturedAt, claimText);
 }
 
 // matches typed as any[] because the engine's runtime objects have all fields
@@ -859,10 +1053,14 @@ export function buildEvidenceFromMatches(
   matches: FactCheckMatch[] | any[] | undefined,
   mode: "fact_check" | "recent_coverage" | undefined,
   stance: Stance,
-  capturedAt: number
+  capturedAt: number,
+  claimText?: string,
 ): EvidenceRecord[] {
   const list = Array.isArray(matches) ? matches : [];
-  const sorted = [...list].sort((a, b) => matchQualityScore(b) - matchQualityScore(a));
+  const scoreFn = claimText
+    ? (m: any) => scoreMatchForClaim(claimText, m)
+    : matchQualityScore;
+  const sorted = [...list].sort((a, b) => scoreFn(b) - scoreFn(a));
 
   return sorted.map((m: any, index: number) => {
     const provider = safeString(m?.provider) || "unknown";

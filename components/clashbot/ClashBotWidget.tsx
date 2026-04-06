@@ -2,12 +2,11 @@
 
 import { LinearGradient } from "expo-linear-gradient";
 import React, { useEffect, useMemo } from "react";
-import { StyleProp, StyleSheet, Text, View, ViewStyle, useWindowDimensions } from "react-native";
+import { Pressable, StyleProp, StyleSheet, Text, View, ViewStyle, useWindowDimensions } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
-  runOnJS,
+  useAnimatedReaction,
   useAnimatedStyle,
-  useDerivedValue,
   useSharedValue,
   withRepeat,
   withSpring,
@@ -71,16 +70,26 @@ export default function ClashBotWidget({
   const maxX = useSharedValue(bounds.maxX);
   const minY = useSharedValue(bounds.minY);
   const maxY = useSharedValue(bounds.maxY);
+  const screenW = useSharedValue(SCREEN_W);
 
-  useDerivedValue(() => {
-    minX.value = bounds.minX;
-    maxX.value = bounds.maxX;
-    minY.value = bounds.minY;
-    maxY.value = bounds.maxY;
-
-    x.value = clamp(x.value, minX.value, maxX.value);
-    y.value = clamp(y.value, minY.value, maxY.value);
-  });
+  useAnimatedReaction(
+    () => ({
+      minX: bounds.minX,
+      maxX: bounds.maxX,
+      minY: bounds.minY,
+      maxY: bounds.maxY,
+      sw: SCREEN_W,
+    }),
+    (next) => {
+      minX.value = next.minX;
+      maxX.value = next.maxX;
+      minY.value = next.minY;
+      maxY.value = next.maxY;
+      screenW.value = next.sw;
+      x.value = clamp(x.value, next.minX, next.maxX);
+      y.value = clamp(y.value, next.minY, next.maxY);
+    }
+  );
 
   const gradientColors: readonly [string, string] =
     tone === "checking"
@@ -142,7 +151,7 @@ export default function ClashBotWidget({
       const clampedX = clamp(projectedX, minX.value, maxX.value);
       const clampedY = clamp(projectedY, minY.value, maxY.value);
 
-      const midpoint = SCREEN_W / 2;
+      const midpoint = screenW.value / 2;
       const targetX = clampedX < midpoint ? minX.value : maxX.value;
 
       x.value = withSpring(targetX, { damping: 16, stiffness: 220, mass: 0.6 });
@@ -156,17 +165,7 @@ export default function ClashBotWidget({
       glow.value = withTiming(0, { duration: 140 });
     });
 
-  const tap = Gesture.Tap()
-    .maxDuration(220)
-    .onStart(() => {
-      scale.value = withTiming(0.97, { duration: 80 });
-    })
-    .onEnd(() => {
-      scale.value = withTiming(1, { duration: 110 });
-      if (onPress) runOnJS(onPress)();
-    });
-
-  const composed = Gesture.Simultaneous(pan, tap);
+  const composed = pan;
 
   const animatedStyle = useAnimatedStyle(() => {
     return {
@@ -189,6 +188,13 @@ export default function ClashBotWidget({
       <Animated.View
         style={[styles.container, { width: size, height: size }, animatedStyle, style]}
       >
+        <Pressable
+          onPress={onPress}
+          onPressIn={() => { scale.value = withTiming(0.97, { duration: 80 }); }}
+          onPressOut={() => { scale.value = withTiming(1, { duration: 110 }); }}
+          style={StyleSheet.absoluteFill}
+        />
+
         <Animated.View style={[styles.glowWrap, glowStyle]} pointerEvents="none">
           <LinearGradient
             colors={glowColors}
@@ -206,6 +212,7 @@ export default function ClashBotWidget({
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
           style={[styles.bubble, { width: size, height: size, borderRadius: size / 2 }]}
+          pointerEvents="none"
         >
           <Text style={styles.bolt}>⚡</Text>
           <Animated.View style={[styles.toneDot, { backgroundColor: toneDot }]} />

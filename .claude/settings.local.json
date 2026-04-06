@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc:*)",
+      "Bash(grep -n \"debugCard\\\\|debugHeader\\\\|debugTitle\\\\|debugPill\\\\|debugGrid\\\\|debugItem\\\\|debugLabel\\\\|debugValue\\\\|debugLine\" C:/Users/nenun/clashroom-mobile/components/clashbot/ClashBotSheet.tsx | grep -v \"^\\\\s*[0-9]*→\\\\s*//\" | head -40)"
+    ]
+  }
+}

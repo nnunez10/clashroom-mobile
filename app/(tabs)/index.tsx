@@ -90,18 +90,32 @@ export default function HomeScreen() {
   const [sheetOpen, setSheetOpen] = useState(false);
   const [sheetMode, setSheetMode] = useState<SheetMode>("dashboard");
   const [quickDraft, setQuickDraft] = useState("");
+  const [pendingQuickClaim, setPendingQuickClaim] = useState("");
 
-  const { transcript, claims, activeClaimsCount, bubbleIsChecking, pushTranscriptLine } =
-    useMockClashBotEngine();
+  const {
+    transcript,
+    claims,
+    activeClaimsCount,
+    bubbleIsChecking,
+    submitDirectClaim,
+  } = useMockClashBotEngine();
 
-  const checkingClaim = useMemo(() => claims.find((c) => c.status === "checking") || null, [claims]);
-  const queuedClaim = useMemo(() => claims.find((c) => c.status === "queued") || null, [claims]);
+  const checkingClaim = useMemo(
+    () => claims.find((c) => c.status === "checking") || null,
+    [claims]
+  );
+  const queuedClaim = useMemo(
+    () => claims.find((c) => c.status === "queued") || null,
+    [claims]
+  );
   const lastResolved = useMemo(() => getLatestResolvedClaim(claims), [claims]);
 
   const widgetTone = useMemo<WidgetTone>(() => {
     if (claims.some((c) => c.status === "checking")) return "checking";
     if (lastResolved?.status === "matched") return "verified";
-    if (lastResolved?.status === "disputed" || lastResolved?.status === "error") return "disputed";
+    if (lastResolved?.status === "disputed" || lastResolved?.status === "error") {
+      return "disputed";
+    }
     return "unverified";
   }, [claims, lastResolved]);
 
@@ -118,22 +132,38 @@ export default function HomeScreen() {
   const subtitle = useMemo(() => {
     if (checkingClaim) return "Checking sources…";
     if (queuedClaim) return "Claim added to queue.";
-    if (lastResolved?.status === "matched") return "Receipts found for the latest claim.";
-    if (lastResolved?.status === "disputed") return "Latest claim appears contradicted.";
+    if (lastResolved?.status === "matched") {
+      return "Receipts found for the latest claim.";
+    }
+    if (lastResolved?.status === "disputed") {
+      return "Latest claim appears contradicted.";
+    }
     if (lastResolved?.status === "error") return "Latest check hit an error.";
-    if (lastResolved?.status === "no_match") return "No direct source found for the latest claim.";
+    if (lastResolved?.status === "no_match") {
+      return "No direct source found for the latest claim.";
+    }
     return "ClashBot verifies claims in real time.";
   }, [checkingClaim, queuedClaim, lastResolved]);
 
   const heroLiveLine = useMemo(() => {
     if (checkingClaim?.text) return `Checking: "${checkingClaim.text}"`;
     if (queuedClaim?.text) return `Queued: "${queuedClaim.text}"`;
+
     if (lastResolved?.text) {
-      if (lastResolved.status === "matched") return `Latest verified: "${lastResolved.text}"`;
-      if (lastResolved.status === "disputed") return `Latest disputed: "${lastResolved.text}"`;
-      if (lastResolved.status === "no_match") return `Latest no-match: "${lastResolved.text}"`;
-      if (lastResolved.status === "error") return `Latest error: "${lastResolved.text}"`;
+      if (lastResolved.status === "matched") {
+        return `Latest verified: "${lastResolved.text}"`;
+      }
+      if (lastResolved.status === "disputed") {
+        return `Latest disputed: "${lastResolved.text}"`;
+      }
+      if (lastResolved.status === "no_match") {
+        return `Latest no-match: "${lastResolved.text}"`;
+      }
+      if (lastResolved.status === "error") {
+        return `Latest error: "${lastResolved.text}"`;
+      }
     }
+
     return "No live claim yet.";
   }, [checkingClaim, queuedClaim, lastResolved]);
 
@@ -181,7 +211,10 @@ export default function HomeScreen() {
     setSheetOpen(true);
   }
 
-  function openQuickVerify() {
+  function openQuickVerify(seedText?: string) {
+    if (seedText) {
+      setPendingQuickClaim(seedText);
+    }
     setSheetMode("quick_verify");
     setSheetOpen(true);
   }
@@ -194,9 +227,11 @@ export default function HomeScreen() {
   function submitQuickVerify() {
     const t = quickDraft.trim();
     if (!t) return;
-    pushTranscriptLine(t);
+
+    setPendingQuickClaim(t);
+    submitDirectClaim(t);
     setQuickDraft("");
-    openQuickVerify();
+    openQuickVerify(t);
   }
 
   return (
@@ -207,7 +242,10 @@ export default function HomeScreen() {
         <View style={styles.vignetteTop} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
         <View style={styles.topRow}>
           <View style={styles.badgeRow}>
             <Text style={styles.heroBadge}>ClashRoom</Text>
@@ -222,7 +260,8 @@ export default function HomeScreen() {
         <View style={styles.hero}>
           <Text style={styles.heroTitle}>Debate. Verify. Settle it.</Text>
           <Text style={styles.heroSub}>
-            Tap ClashBot when someone says “you sure about that?” Then it pulls receipts, not vibes.
+            Tap ClashBot when someone says “you sure about that?” Then it pulls
+            receipts, not vibes.
           </Text>
 
           <View style={styles.quickRow}>
@@ -236,7 +275,7 @@ export default function HomeScreen() {
               onSubmitEditing={submitQuickVerify}
             />
 
-            <Pressable onPress={openQuickVerify} style={styles.micBtn} hitSlop={10}>
+            <Pressable onPress={openDashboard} style={styles.micBtn} hitSlop={10}>
               <Text style={styles.micBtnText}>Mic</Text>
             </Pressable>
 
@@ -245,7 +284,9 @@ export default function HomeScreen() {
             </Pressable>
           </View>
 
-          <Text style={styles.privacyLine}>Privacy: not listening unless you tap Mic.</Text>
+          <Text style={styles.privacyLine}>
+            Privacy: not listening unless you tap Mic.
+          </Text>
 
           <View style={styles.heroLiveCard}>
             <Text style={styles.heroLiveLabel}>ClashBot Live</Text>
@@ -282,11 +323,13 @@ export default function HomeScreen() {
             <Text style={styles.primaryCtaText}>Open ClashBot</Text>
           </Pressable>
 
-          <Pressable onPress={openQuickVerify} style={styles.secondaryCta}>
+          <Pressable onPress={openDashboard} style={styles.secondaryCta}>
             <Text style={styles.secondaryCtaText}>Verify a claim</Text>
           </Pressable>
 
-          <Text style={styles.heroHint}>Tip: Type or say a claim. ClashBot returns receipts.</Text>
+          <Text style={styles.heroHint}>
+            Tip: Type or say a claim. ClashBot returns receipts.
+          </Text>
         </View>
 
         <View style={styles.statsRow}>
@@ -321,7 +364,7 @@ export default function HomeScreen() {
               </Text>
             </View>
 
-            <Pressable onPress={openQuickVerify} style={styles.secondaryCta}>
+            <Pressable onPress={openDashboard} style={styles.secondaryCta}>
               <Text style={styles.secondaryCtaText}>Try a quick verify</Text>
             </Pressable>
           </View>
@@ -337,19 +380,19 @@ export default function HomeScreen() {
             tag="Hot Take"
             title="“Inflation is down” vs “Prices are still up”"
             caption="ClashBot separates measurable data from interpretation."
-            onPress={openQuickVerify}
+            onPress={openDashboard}
           />
           <ClipCard
             tag="Sports"
             title="“This is the best QB season ever”"
             caption="Stats vs narratives. Verified numbers, not vibes."
-            onPress={openQuickVerify}
+            onPress={openDashboard}
           />
           <ClipCard
             tag="Pop Culture"
             title="“That clip is edited”"
             caption="Show context sources and flag uncertainty clearly."
-            onPress={openQuickVerify}
+            onPress={openDashboard}
           />
         </View>
 
@@ -362,8 +405,17 @@ export default function HomeScreen() {
           onClose={closeSheet}
           transcript={transcript}
           claims={claims}
-          onSubmitClaim={(text) => pushTranscriptLine(text)}
-          mode={sheetMode as any}
+          onSubmitClaim={submitDirectClaim}
+          onDashboardSubmit={(text) => {
+            const t = text.trim();
+            if (!t) return;
+            setPendingQuickClaim(t);
+            submitDirectClaim(t);
+            setSheetMode("quick_verify");
+          }}
+          mode={sheetMode}
+          initialDraft={sheetMode === "quick_verify" ? pendingQuickClaim : ""}
+          quickVerifyTarget={sheetMode === "quick_verify" ? pendingQuickClaim : undefined}
         />
 
         {!sheetOpen && (
@@ -371,7 +423,7 @@ export default function HomeScreen() {
             tone={widgetTone}
             subtitle={widgetSubtitle}
             activeCount={activeClaimsCount}
-            onPress={openQuickVerify}
+            onPress={openDashboard}
             initialSide="right"
             style={styles.bubble}
           />
@@ -687,4 +739,4 @@ const styles = StyleSheet.create({
     zIndex: 999,
     elevation: 20,
   },
-}); 
+});
