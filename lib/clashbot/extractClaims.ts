@@ -17,6 +17,12 @@ export type Claim = {
   ts: number;
   status: ClaimStatus;
 
+  authorId?: string;
+  authorName?: string;
+
+  pendingResponse?: boolean;
+  responseDeadline?: number;
+
   checkingAt?: number;
   completedAt?: number;
   verification?: VerificationResult;

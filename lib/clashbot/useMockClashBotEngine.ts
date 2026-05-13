@@ -2,9 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { verifyClaimText } from ".";
+import { applyLoss } from "./behaviorEngine";
 import { areClaimsInSameFamily, getClaimDna } from "./claimDna";
 import { Claim, claimFingerprint, extractClaimsFromLine } from "./extractClaims";
 import { findKnownFactOverride } from "./knownFacts";
+import { getNextPriorityClaim } from "./liveDebateQueue";
+import { invertSubjectiveClaim, isSubjectiveClaim } from "./subjectiveClash";
 import { startMockTranscriptStream } from "./mockStream";
 import { normalizeClaimInput, suggestTypoCorrection } from "./normalizeInput";
 import {
@@ -42,7 +45,11 @@ type ClaimEventType =
   | "claim_contradicted"
   | "claim_unclear"
   | "claim_no_match"
-  | "claim_error";
+  | "claim_error"
+  | "auto_loss_no_response"
+  | "duplicate_detected"
+  | "challenge_issued"
+  | "challenge_defended";
 
 type ClaimEvent = {
   id: string;
@@ -77,6 +84,15 @@ type EngineVerificationCompat = {
   message?: string;
   stance?: "supported" | "contradicted" | "unclear";
   relevance?: { relevant: boolean; reason: string };
+  reasonCode?: string;
+  confidenceTier?: string;
+  confidenceScore?: number;
+  /** Derived by getResultMeta — what kind of result this is. */
+  resultType?: "breaking_coverage" | "fact_check" | "mixed";
+  /** Human-readable confidence label, e.g. "High confidence". */
+  confidenceLabel?: string;
+  /** One sentence explaining why this result was selected. */
+  shortWhyItWon?: string;
 };
 
 type EngineClaim = Omit<Claim, "verification"> & {
@@ -100,6 +116,19 @@ type EngineClaim = Omit<Claim, "verification"> & {
   derivedFromClaimId?: string | null;
   evidence?: EvidenceRecord[];
   events?: ClaimEvent[];
+  isClash?: boolean;
+  clashPartnerId?: string | null;
+  isSubjective?: boolean;
+  pendingResponse?: boolean;
+  responseDeadline?: number;
+  authorId?: string;
+  authorName?: string;
+  challengedBy?: {
+    userId: string;
+    userName: string;
+    at: number;
+    message?: string;
+  } | null;
 };
 
 type FamilyRegistryEntry = {
@@ -107,6 +136,8 @@ type FamilyRegistryEntry = {
   leadClaimId: string;
   seedText: string;
 };
+
+const RESPONSE_WINDOW_MS = 15_000;
 
 function appendClaimEvent(
   claim: EngineClaim,
@@ -138,15 +169,88 @@ function withTimeline(claim: EngineClaim, patch: Partial<EngineClaim>): EngineCl
   };
 }
 
+function getResolvedStance(status?: ClaimStatus, verification?: EngineVerificationCompat) {
+  if (status !== "matched" && status !== "disputed") return null;
+
+  const stance = verification?.stance;
+  if (stance === "supported" || stance === "contradicted") return stance;
+
+  return null;
+}
+
+function markFamilyClash(claims: EngineClaim[], familyId?: string | null): EngineClaim[] {
+  if (!familyId) return claims;
+
+  const familyClaims = claims.filter((c) => c.familyId === familyId);
+
+  const supportedClaim =
+    familyClaims.find(
+      (c) => getResolvedStance(c.status, c.verification) === "supported"
+    ) ?? null;
+
+  const contradictedClaim =
+    familyClaims.find(
+      (c) => getResolvedStance(c.status, c.verification) === "contradicted"
+    ) ?? null;
+
+  const isClashFamily = !!supportedClaim && !!contradictedClaim;
+  if (!isClashFamily) return claims;
+
+  return claims.map((c) => {
+    if (c.familyId !== familyId) return c;
+
+    if (supportedClaim && c.id === supportedClaim.id) {
+      return {
+        ...c,
+        isClash: true,
+        clashPartnerId: contradictedClaim?.id ?? null,
+      };
+    }
+
+    if (contradictedClaim && c.id === contradictedClaim.id) {
+      return {
+        ...c,
+        isClash: true,
+        clashPartnerId: supportedClaim?.id ?? null,
+      };
+    }
+
+    return {
+      ...c,
+      isClash: true,
+      clashPartnerId: c.clashPartnerId ?? null,
+    };
+  });
+}
+
+function clearPendingDefenseForFamily(
+  claims: EngineClaim[],
+  familyId?: string | null
+): EngineClaim[] {
+  if (!familyId) return claims;
+
+  return claims.map((claim) =>
+    claim.familyId === familyId && claim.pendingResponse
+      ? {
+          ...claim,
+          pendingResponse: false,
+          responseDeadline: undefined,
+        }
+      : claim
+  );
+}
+
 export function useMockClashBotEngine(options: EngineOptions = {}) {
   const demoMode = !!options.demoMode;
 
   const [transcript, setTranscript] = useState<string[]>([]);
   const [claims, setClaims] = useState<EngineClaim[]>([]);
+  const [clashCred, setClashCred] = useState(100);
   // Synchronous mirror of claims state — kept fresh on every render so
   // submitDirectClaim can read current claims without capturing a stale closure.
   const claimsRef = useRef<EngineClaim[]>([]);
   claimsRef.current = claims;
+  const autoLossAppliedRef = useRef<Set<string>>(new Set());
 
   // Maps fingerprint → timestamp (ms) of first submission this session.
   // Claims whose entry is older than SEEN_CLAIM_COOLDOWN_MS are eligible for re-verification.
@@ -180,8 +284,10 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
     seenClaimsRef.current = new Map();
     familyRegistryRef.current = [];
     familyClaimIdMapRef.current = new Map();
+    autoLossAppliedRef.current = new Set();
 
     setLastClaimAt(0);
+    setClashCred(100);
     lastMockLineAtRef.current = 0;
 
     demoClaimIdsRef.current = new Set();
@@ -200,7 +306,7 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
       if (!newClaims.length) return;
 
       setClaims((prev) => {
-        const next = [...prev];
+        let updatedClaims = [...prev];
         let addedAny = false;
 
         for (const c of newClaims) {
@@ -208,7 +314,8 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
           const dna = getClaimDna(c.text);
 
           const seenAt = seenClaimsRef.current.get(fp);
-          const exactSeen = seenAt !== undefined && ts - seenAt < SEEN_CLAIM_COOLDOWN_MS;
+          const exactSeen =
+            seenAt !== undefined && ts - seenAt < SEEN_CLAIM_COOLDOWN_MS;
           if (exactSeen) continue;
 
           const existingFamily =
@@ -228,16 +335,32 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
             familyClaimIdMapRef.current.get(resolvedFamilyId) ||
             null;
 
-          // Suppress near-duplicate: if this family already has a claim that
-          // is queued or actively checking, don't pile up another pending
-          // entry for the same topic. The timestamp was already recorded in
-          // seenClaimsRef above, so the exact text is blocked until cooldown expires.
-          const familyHasActiveClaim = prev.some(
+          // Repeat/family escalation: if this family already has an active claim,
+          // boost the whole family's recency instead of creating another claim.
+          const existingActiveClaim = updatedClaims.find(
             (existing) =>
               existing.familyId === resolvedFamilyId &&
               (existing.status === "queued" || existing.status === "checking")
           );
-          if (familyHasActiveClaim) continue;
+
+          if (existingActiveClaim) {
+            const boostedAt = Date.now();
+
+            updatedClaims = updatedClaims.map((claim) =>
+              claim.familyId === resolvedFamilyId
+                ? {
+                    ...claim,
+                    createdAt: boostedAt,
+                    timeline: {
+                      ...claim.timeline,
+                      queuedAt: boostedAt,
+                    },
+                  }
+                : claim
+            );
+
+            continue;
+          }
 
           if (!existingFamily) {
             familyRegistryRef.current.push({
@@ -295,12 +418,13 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
             }
           );
 
-          next.unshift(seededClaim);
+          updatedClaims = clearPendingDefenseForFamily(updatedClaims, resolvedFamilyId);
+          updatedClaims.unshift(seededClaim);
           addedAny = true;
         }
 
         if (addedAny) setLastClaimAt(Date.now());
-        return next.slice(0, 20);
+        return updatedClaims.slice(0, 20);
       });
     },
     [demoMode]
@@ -320,7 +444,7 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
 
       // Use normalized text for DNA / fingerprinting so that minor typing
       // noise ("teh earth is flat" vs "the earth is flat") maps to the same
-      // family.  raw is preserved for display; normalized goes to the API.
+      // family. raw is preserved for display; normalized goes to the API.
       const claimId = makeId("claim", `${normalized}_${ts}`);
       const fp = claimFingerprint(normalized);
       const dna = getClaimDna(normalized);
@@ -348,7 +472,42 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
           existing.familyId === resolvedFamilyId &&
           (existing.status === "queued" || existing.status === "checking")
       );
-      if (familyHasActiveClaim) return;
+      if (familyHasActiveClaim) {
+        if (
+          claimsRef.current.some(
+            (existing) =>
+              existing.familyId === resolvedFamilyId && existing.pendingResponse
+          )
+        ) {
+          setClaims((prev) => clearPendingDefenseForFamily(prev, resolvedFamilyId));
+        }
+        return;
+      }
+
+      // Fingerprint dedup: if a completed claim with the same fingerprint already
+      // exists in the list, tag it with a duplicate_detected event and bail out.
+      const fingerprintDuplicate = claimsRef.current.find(
+        (c) => c.claimDna?.fingerprint === fp
+      );
+      if (fingerprintDuplicate) {
+        setClaims((prev) =>
+          prev.map((c) =>
+            c.id === fingerprintDuplicate.id
+              ? {
+                  ...c,
+                  events: appendClaimEvent(
+                    c,
+                    "duplicate_detected",
+                    ts,
+                    "Similar claim already exists.",
+                    { fingerprint: fp }
+                  ),
+                }
+              : c
+          )
+        );
+        return;
+      }
 
       // Accepted — commit side effects only now, after the gate has passed.
       seenClaimsRef.current.set(fp, ts);
@@ -364,6 +523,67 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
       if (!familyClaimIdMapRef.current.has(resolvedFamilyId)) {
         familyClaimIdMapRef.current.set(resolvedFamilyId, claimId);
       }
+
+      // ---------------------------------------------------------------------------
+      // Subjective claim fast-path: skip verification, inject clash pair directly.
+      // ---------------------------------------------------------------------------
+      if (isSubjectiveClaim(raw)) {
+        const invertedText = invertSubjectiveClaim(raw);
+        const invertedId = makeId("claim", `${invertedText}_${ts}`);
+        const invertedDna = getClaimDna(invertedText);
+
+        // Register the inverted text in seenClaimsRef so it isn't re-queued
+        seenClaimsRef.current.set(claimFingerprint(invertedText), ts);
+
+        const claimA: EngineClaim = {
+          id: claimId,
+          text: raw,
+          ts,
+          normalizedText: normalized !== raw ? normalized : undefined,
+          createdAt: ts,
+          status: "no_match",
+          fingerprint: dna.fingerprint,
+          claimDna: { ...dna, familyId: resolvedFamilyId },
+          familyId: resolvedFamilyId,
+          derivedFromClaimId: null,
+          evidence: [],
+          events: [],
+          timeline: { queuedAt: ts, completedAt: ts },
+          completedAt: ts,
+          isClash: true,
+          clashPartnerId: invertedId,
+          isSubjective: true,
+        };
+
+        const claimB: EngineClaim = {
+          id: invertedId,
+          text: invertedText,
+          ts,
+          createdAt: ts,
+          status: "no_match",
+          fingerprint: invertedDna.fingerprint,
+          claimDna: { ...invertedDna, familyId: resolvedFamilyId },
+          familyId: resolvedFamilyId,
+          derivedFromClaimId: claimId,
+          evidence: [],
+          events: [],
+          timeline: { queuedAt: ts, completedAt: ts },
+          completedAt: ts,
+          isClash: true,
+          clashPartnerId: claimId,
+          isSubjective: true,
+        };
+
+        setClaims((prev) =>
+          [claimB, claimA, ...clearPendingDefenseForFamily(prev, resolvedFamilyId)].slice(
+            0,
+            20
+          )
+        );
+        setLastClaimAt(ts);
+        return;
+      }
+      // ---------------------------------------------------------------------------
 
       // raw → displayed to user; normalized → sent to API and used for matching
       const c = { id: claimId, text: raw, ts };
@@ -406,7 +626,12 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
       );
 
       // Pure updater: no side effects, just the array insertion.
-      setClaims((prev) => [seededClaim, ...prev].slice(0, 20));
+      setClaims((prev) =>
+        [seededClaim, ...clearPendingDefenseForFamily(prev, resolvedFamilyId)].slice(
+          0,
+          20
+        )
+      );
 
       setLastClaimAt(ts);
     },
@@ -428,9 +653,57 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
   }, [demoMode, pushTranscriptLine]);
 
   useEffect(() => {
+    const timer = setInterval(() => {
+      const now = Date.now();
+      const expiredClaimIds = claimsRef.current
+        .filter(
+          (claim) =>
+            claim.pendingResponse &&
+            claim.responseDeadline &&
+            now > claim.responseDeadline &&
+            !autoLossAppliedRef.current.has(claim.id)
+        )
+        .map((claim) => claim.id);
+
+      if (!expiredClaimIds.length) return;
+
+      for (const claimId of expiredClaimIds) {
+        autoLossAppliedRef.current.add(claimId);
+      }
+
+      setClashCred((prev) =>
+        expiredClaimIds.reduce((nextCred) => applyLoss(nextCred), prev)
+      );
+
+      setClaims((prev) => {
+        const expired = new Set(expiredClaimIds);
+
+        return prev.map((claim) => {
+          if (!expired.has(claim.id) || !claim.pendingResponse) return claim;
+
+          return {
+            ...claim,
+            pendingResponse: false,
+            responseDeadline: undefined,
+            events: appendClaimEvent(
+              claim,
+              "auto_loss_no_response",
+              now,
+              "No response in time",
+              { familyId: claim.familyId }
+            ),
+          };
+        });
+      });
+    }, 500);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     if (verifyingRef.current) return;
 
-    const nextQueued = claims.find((c) => c.status === "queued");
+    const nextQueued = getNextPriorityClaim(claims as any) as EngineClaim | undefined;
     if (!nextQueued) return;
 
     const claimId = nextQueued.id;
@@ -470,30 +743,38 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
           if (!mountedRef.current) return;
 
           setClaims((prev) =>
-            prev.map((c) => {
-              if (c.id !== claimId) return c;
+            markFamilyClash(
+              prev.map((c) => {
+                if (c.id !== claimId) return c;
 
-              const stance = override.contradictsClaim ? "contradicted" : "supported";
-              const evidence = buildEvidenceFromResult(overrideVerification, stance, completedAt);
+                const stance = override.contradictsClaim ? "contradicted" : "supported";
+                const evidence = buildEvidenceFromResult(overrideVerification, stance, completedAt);
+                const pendingResponse = overrideVerification?.stance === "contradicted";
 
-              return withTimeline(c, {
-                status: override.contradictsClaim ? "disputed" : "matched",
-                verification: overrideVerification ?? undefined,
-                evidence,
-                completedAt,
-                events: appendClaimEvent(
-                  c,
-                  "claim_override_matched",
+                return withTimeline(c, {
+                  status: override.contradictsClaim ? "disputed" : "matched",
+                  verification: overrideVerification ?? undefined,
+                  evidence,
                   completedAt,
-                  override.reason,
-                  {
-                    familyId: c.familyId,
-                    stance,
-                    evidenceCount: evidence.length,
-                  }
-                ),
-              });
-            })
+                  pendingResponse,
+                  responseDeadline: pendingResponse
+                    ? completedAt + RESPONSE_WINDOW_MS
+                    : undefined,
+                  events: appendClaimEvent(
+                    c,
+                    "claim_override_matched",
+                    completedAt,
+                    override.reason,
+                    {
+                      familyId: c.familyId,
+                      stance,
+                      evidenceCount: evidence.length,
+                    }
+                  ),
+                });
+              }),
+              nextQueued.familyId
+            )
           );
 
           setLastClaimAt(Date.now());
@@ -504,6 +785,33 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
         if (!mountedRef.current) return;
 
         const result = rawResult || {};
+
+        // Explicit fallback: if the API returned nothing actionable, resolve as no_match
+        // so the claim always exits "checking" state.
+        if (!result.status && !result.matches?.length) {
+          const completedAt = Date.now();
+          setClaims((prev) =>
+            prev.map((c) => {
+              if (c.id !== claimId) return c;
+              return withTimeline(c, {
+                status: "no_match",
+                verification: { status: "no_match", matches: [] },
+                evidence: [],
+                completedAt,
+                events: appendClaimEvent(
+                  c,
+                  "claim_no_match",
+                  completedAt,
+                  "No result returned by verification service.",
+                  { familyId: c.familyId }
+                ),
+              });
+            })
+          );
+          setLastClaimAt(Date.now());
+          return;
+        }
+
         const top: any = result?.top || result?.matches?.[0] || null;
         const mode = result?.mode as "fact_check" | "recent_coverage" | undefined;
         const candidateText = buildCandidateText(result, top);
@@ -516,6 +824,7 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
         const completedAt = Date.now();
 
         setClaims((prev) =>
+          markFamilyClash(
           prev.map((c) => {
             if (c.id !== claimId) return c;
 
@@ -561,12 +870,17 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
                 );
 
                 const evidence = buildEvidenceFromResult(result, stance, completedAt, claimText);
+                const pendingResponse = verification.stance === "contradicted";
 
                 return withTimeline(c, {
                   status: "disputed",
                   verification,
                   evidence,
                   completedAt,
+                  pendingResponse,
+                  responseDeadline: pendingResponse
+                    ? completedAt + RESPONSE_WINDOW_MS
+                    : undefined,
                   events: appendClaimEvent(
                     c,
                     "claim_contradicted",
@@ -620,15 +934,8 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
 
               const evidence = buildEvidenceFromResult(result, stance, completedAt, claimText);
 
-              const claimStatus =
-                stance === "supported"
-                  ? "matched"
-                  : stance === "contradicted"
-                  ? "disputed"
-                  : "disputed";
-
               return withTimeline(c, {
-                status: claimStatus,
+                status: "disputed",
                 verification,
                 evidence,
                 completedAt,
@@ -693,7 +1000,9 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
                 { familyId: c.familyId }
               ),
             });
-          })
+          }),
+          nextQueued.familyId
+          )
         );
 
         setLastClaimAt(Date.now());
@@ -742,6 +1051,7 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
   return {
     transcript,
     claims,
+    clashCred,
     activeClaimsCount,
     bubbleIsChecking,
     pushTranscriptLine,
