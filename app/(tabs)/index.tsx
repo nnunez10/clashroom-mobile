@@ -336,20 +336,12 @@ export default function HomeScreen() {
   const callStop = useCallback(() => { stopPushToClaimRef.current(); }, []);
 
   const micGesture = useMemo(() =>
-    Gesture.Manual()
-      .onTouchesDown((_e, stateManager) => {
+    Gesture.LongPress()
+      .minDuration(0)
+      .maxDistance(999)
+      .onStart(() => {
         "worklet";
-        stateManager.begin();
-        stateManager.activate();
         runOnJS(callStart)();
-      })
-      .onTouchesUp((_e, stateManager) => {
-        "worklet";
-        stateManager.end();
-      })
-      .onTouchesCancelled((_e, stateManager) => {
-        "worklet";
-        stateManager.fail();
       })
       .onFinalize(() => {
         "worklet";
