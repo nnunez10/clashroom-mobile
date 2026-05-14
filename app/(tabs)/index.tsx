@@ -1,6 +1,6 @@
 // app/(tabs)/index.tsx
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Platform,
   Pressable,
@@ -11,6 +11,7 @@ import {
   View,
 } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import { runOnJS } from "react-native-reanimated";
 import type {
   SpeechErrorEvent,
   SpeechResultsEvent,
@@ -316,28 +317,38 @@ export default function HomeScreen() {
     }
   }
 
+  // Refs hold the latest function versions but are never passed into worklets.
   const startPushToClaimRef = useRef(startPushToClaim);
   startPushToClaimRef.current = startPushToClaim;
   const stopPushToClaimRef = useRef(stopPushToClaim);
   stopPushToClaimRef.current = stopPushToClaim;
 
+  // Stable JS-thread callbacks delegating through refs. These are the values
+  // passed to runOnJS — a plain function reference, not the ref object itself.
+  const callStart = useCallback(() => { startPushToClaimRef.current(); }, []);
+  const callStop = useCallback(() => { stopPushToClaimRef.current(); }, []);
+
   const micGesture = useMemo(() =>
     Gesture.Manual()
       .onTouchesDown((_e, stateManager) => {
+        "worklet";
         stateManager.begin();
         stateManager.activate();
-        startPushToClaimRef.current();
+        runOnJS(callStart)();
       })
       .onTouchesUp((_e, stateManager) => {
+        "worklet";
         stateManager.end();
       })
       .onTouchesCancelled((_e, stateManager) => {
+        "worklet";
         stateManager.fail();
       })
       .onFinalize(() => {
-        stopPushToClaimRef.current();
+        "worklet";
+        runOnJS(callStop)();
       }),
-    []
+    [callStart, callStop]
   );
 
   useEffect(() => {
