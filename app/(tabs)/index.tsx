@@ -256,7 +256,10 @@ export default function HomeScreen() {
 
     try {
       const voice = await getVoice();
-      if (speechSessionRef.current !== sessionId || !speechActiveRef.current) return;
+      if (speechSessionRef.current !== sessionId || !speechActiveRef.current) {
+        console.log("[PushToClaim] aborted after getVoice — session:", speechSessionRef.current, "expected:", sessionId, "active:", speechActiveRef.current);
+        return;
+      }
 
       if (!voice) {
         speechActiveRef.current = false;
@@ -266,7 +269,11 @@ export default function HomeScreen() {
       }
 
       const available = await voice.isAvailable();
-      if (speechSessionRef.current !== sessionId || !speechActiveRef.current) return;
+      console.log("[PushToClaim] isAvailable:", available);
+      if (speechSessionRef.current !== sessionId || !speechActiveRef.current) {
+        console.log("[PushToClaim] aborted after isAvailable — session:", speechSessionRef.current, "expected:", sessionId);
+        return;
+      }
 
       if (!available) {
         speechActiveRef.current = false;
@@ -290,9 +297,9 @@ export default function HomeScreen() {
 
   async function stopPushToClaim() {
     if (!speechActiveRef.current) return;
+    speechActiveRef.current = false;
 
     console.log("[PushToClaim] mic release");
-    speechSessionRef.current += 1;
     setVoiceHint("Drafting claim...");
     clearSpeechEndTimer();
     speechEndTimerRef.current = setTimeout(commitSpeechDraft, 1200);
