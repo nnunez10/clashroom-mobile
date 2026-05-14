@@ -1,13 +1,28 @@
 // app/(tabs)/index.tsx
 
-import React, { useMemo, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import type {
+  SpeechErrorEvent,
+  SpeechResultsEvent,
+} from "@react-native-voice/voice";
 import ClashBotSheet from "../../components/clashbot/ClashBotSheet";
 import ClashBotWidget from "../../components/clashbot/ClashBotWidget";
+import { isSubjectiveClaim } from "../../lib/clashbot/subjectiveClash";
 import { useMockClashBotEngine } from "../../lib/clashbot/useMockClashBotEngine";
 
 type SheetMode = "dashboard" | "quick_verify";
 type WidgetTone = "unverified" | "checking" | "verified" | "disputed";
+type VoiceModule = typeof import("@react-native-voice/voice").default;
 
 const COLORS = {
   bg: "#06141A",
@@ -91,6 +106,16 @@ export default function HomeScreen() {
   const [sheetMode, setSheetMode] = useState<SheetMode>("dashboard");
   const [quickDraft, setQuickDraft] = useState("");
   const [pendingQuickClaim, setPendingQuickClaim] = useState("");
+  const [pendingResponse, setPendingResponse] = useState(false);
+  const [isListeningForClaim, setIsListeningForClaim] = useState(false);
+  const [voiceHint, setVoiceHint] = useState("PRESS + HOLD TO TALK");
+  const userSubmittedTextsRef = useRef<Set<string>>(new Set());
+  const voiceRef = useRef<VoiceModule | null>(null);
+  const speechTextRef = useRef("");
+  const speechActiveRef = useRef(false);
+  const speechSessionRef = useRef(0);
+  const speechEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
 
   const {
     transcript,
@@ -98,7 +123,233 @@ export default function HomeScreen() {
     activeClaimsCount,
     bubbleIsChecking,
     submitDirectClaim,
+    challengeClaim,
   } = useMockClashBotEngine();
+
+  // Detect when a user-submitted claim becomes a clash
+  useEffect(() => {
+    if (pendingResponse) return;
+    const hasClash = claims.some(
+      (c: any) => c.isClash && userSubmittedTextsRef.current.has(c.text)
+    );
+    const hasManualChallenge = claims.some(
+      (c: any) => c.pendingResponse && c.challengedBy
+    );
+    if (hasClash || hasManualChallenge) setPendingResponse(true);
+  }, [claims, pendingResponse]);
+
+  function handleDirectSubmit(text: string) {
+    userSubmittedTextsRef.current.add(text.trim());
+    submitDirectClaim(text);
+  }
+
+  function handlePendingResolved() {
+    // Remove responded claim texts so they don't re-trigger
+    claims
+      .filter((c: any) => c.isClash && userSubmittedTextsRef.current.has(c.text))
+      .forEach((c: any) => userSubmittedTextsRef.current.delete(c.text));
+    setPendingResponse(false);
+  }
+
+  function handleChallengeClaim(claimId: string) {
+    challengeClaim(claimId);
+  }
+
+  function clearSpeechEndTimer() {
+    if (!speechEndTimerRef.current) return;
+    clearTimeout(speechEndTimerRef.current);
+    speechEndTimerRef.current = null;
+  }
+
+  function rememberSpeechResult(event?: SpeechResultsEvent) {
+    const next = event?.value?.[0]?.trim();
+    if (next) speechTextRef.current = next;
+  }
+
+  function speechErrorMessage(eventOrError: SpeechErrorEvent | unknown) {
+    const raw =
+      typeof eventOrError === "object" && eventOrError !== null && "error" in eventOrError
+        ? JSON.stringify((eventOrError as SpeechErrorEvent).error)
+        : String(eventOrError ?? "");
+    const lower = raw.toLowerCase();
+
+    if (lower.includes("permission") || lower.includes("denied")) {
+      return "Mic permission denied. Enable it to speak a claim.";
+    }
+
+    if (lower.includes("no speech") || lower.includes("didn't hear")) {
+      return "Didn't catch that. Hold and try again.";
+    }
+
+    if (lower.includes("available") || lower.includes("native module")) {
+      return "Speech recognition is not available in this build.";
+    }
+
+    return "Could not transcribe that. Try again.";
+  }
+
+  function commitSpeechDraft() {
+    clearSpeechEndTimer();
+    speechActiveRef.current = false;
+    setIsListeningForClaim(false);
+
+    const next = speechTextRef.current.trim();
+    if (!next) {
+      setVoiceHint("Didn't catch that. Hold and try again.");
+      return;
+    }
+
+    setQuickDraft(next);
+    setVoiceHint("Draft ready. Hit Verify.");
+  }
+
+  async function getVoice() {
+    if (Platform.OS === "web") return null;
+
+    if (!voiceRef.current) {
+      const mod = await import("@react-native-voice/voice");
+      voiceRef.current = mod.default;
+    }
+
+    const voice = voiceRef.current;
+    voice.onSpeechPartialResults = rememberSpeechResult;
+    voice.onSpeechResults = (event) => {
+      console.log("[PushToClaim] speech results", event?.value);
+      rememberSpeechResult(event);
+      commitSpeechDraft();
+    };
+    voice.onSpeechEnd = () => {
+      console.log("[PushToClaim] speech end");
+      clearSpeechEndTimer();
+      speechEndTimerRef.current = setTimeout(commitSpeechDraft, 450);
+    };
+    voice.onSpeechError = (event) => {
+      console.log("[PushToClaim] speech error", event?.error);
+      clearSpeechEndTimer();
+      rememberSpeechResult();
+      speechActiveRef.current = false;
+      setIsListeningForClaim(false);
+
+      if (speechTextRef.current.trim()) {
+        commitSpeechDraft();
+        return;
+      }
+
+      setVoiceHint(speechErrorMessage(event));
+    };
+
+    return voice;
+  }
+
+  async function startPushToClaim() {
+    if (speechActiveRef.current) return;
+
+    console.log("[PushToClaim] mic press start");
+    const sessionId = speechSessionRef.current + 1;
+    speechSessionRef.current = sessionId;
+    clearSpeechEndTimer();
+    speechTextRef.current = "";
+    speechActiveRef.current = true;
+    setIsListeningForClaim(true);
+    setVoiceHint("Listening... release to draft.");
+
+    try {
+      const voice = await getVoice();
+      if (speechSessionRef.current !== sessionId || !speechActiveRef.current) return;
+
+      if (!voice) {
+        speechActiveRef.current = false;
+        setIsListeningForClaim(false);
+        setVoiceHint("Mic claims need iOS or Android.");
+        return;
+      }
+
+      const available = await voice.isAvailable();
+      if (speechSessionRef.current !== sessionId || !speechActiveRef.current) return;
+
+      if (!available) {
+        speechActiveRef.current = false;
+        setIsListeningForClaim(false);
+        setVoiceHint("Speech recognition is not available on this device.");
+        return;
+      }
+
+      console.log("[PushToClaim] Voice.start");
+      await voice.start("en-US");
+      if (speechSessionRef.current !== sessionId || !speechActiveRef.current) {
+        console.log("[PushToClaim] Voice.stop after canceled start");
+        await voice.stop().catch(() => undefined);
+      }
+    } catch (error) {
+      speechActiveRef.current = false;
+      setIsListeningForClaim(false);
+      setVoiceHint(speechErrorMessage(error));
+    }
+  }
+
+  async function stopPushToClaim() {
+    if (!speechActiveRef.current) return;
+
+    console.log("[PushToClaim] mic release");
+    speechSessionRef.current += 1;
+    setVoiceHint("Drafting claim...");
+    clearSpeechEndTimer();
+    speechEndTimerRef.current = setTimeout(commitSpeechDraft, 1200);
+
+    if (!voiceRef.current) {
+      commitSpeechDraft();
+      return;
+    }
+
+    try {
+      console.log("[PushToClaim] Voice.stop");
+      await voiceRef.current.stop();
+    } catch (error) {
+      if (speechTextRef.current.trim()) {
+        commitSpeechDraft();
+        return;
+      }
+
+      speechActiveRef.current = false;
+      setIsListeningForClaim(false);
+      setVoiceHint(speechErrorMessage(error));
+    }
+  }
+
+  const startPushToClaimRef = useRef(startPushToClaim);
+  startPushToClaimRef.current = startPushToClaim;
+  const stopPushToClaimRef = useRef(stopPushToClaim);
+  stopPushToClaimRef.current = stopPushToClaim;
+
+  const micGesture = useMemo(() =>
+    Gesture.Manual()
+      .onTouchesDown((_e, stateManager) => {
+        stateManager.begin();
+        stateManager.activate();
+        startPushToClaimRef.current();
+      })
+      .onTouchesUp((_e, stateManager) => {
+        stateManager.end();
+      })
+      .onTouchesCancelled((_e, stateManager) => {
+        stateManager.fail();
+      })
+      .onFinalize(() => {
+        stopPushToClaimRef.current();
+      }),
+    []
+  );
+
+  useEffect(() => {
+    return () => {
+      clearSpeechEndTimer();
+      const voice = voiceRef.current;
+      if (!voice) return;
+
+      voice.destroy().catch(() => undefined);
+      voice.removeAllListeners();
+    };
+  }, []);
 
   const checkingClaim = useMemo(
     () => claims.find((c) => c.status === "checking") || null,
@@ -229,7 +480,7 @@ export default function HomeScreen() {
     if (!t) return;
 
     setPendingQuickClaim(t);
-    submitDirectClaim(t);
+    handleDirectSubmit(t);
     setQuickDraft("");
     openQuickVerify(t);
   }
@@ -244,6 +495,8 @@ export default function HomeScreen() {
 
       <ScrollView
         contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+        scrollEnabled={!isListeningForClaim}
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.topRow}>
@@ -275,17 +528,31 @@ export default function HomeScreen() {
               onSubmitEditing={submitQuickVerify}
             />
 
-            <Pressable onPress={openDashboard} style={styles.micBtn} hitSlop={10}>
-              <Text style={styles.micBtnText}>Mic</Text>
-            </Pressable>
+            <GestureDetector gesture={micGesture}>
+              <View
+                style={[styles.micBtn, isListeningForClaim && styles.micBtnActive]}
+                accessibilityRole="button"
+                accessibilityLabel="Press and hold to speak a claim"
+              >
+                <Text
+                  style={[
+                    styles.micBtnText,
+                    isListeningForClaim && styles.micBtnTextActive,
+                  ]}
+                >
+                  {isListeningForClaim ? "Release" : "Mic"}
+                </Text>
+              </View>
+            </GestureDetector>
 
             <Pressable onPress={submitQuickVerify} style={styles.verifyBtn} hitSlop={10}>
               <Text style={styles.verifyBtnText}>Verify</Text>
             </Pressable>
           </View>
 
+          <Text style={styles.voiceHintLine}>{voiceHint}</Text>
           <Text style={styles.privacyLine}>
-            Privacy: not listening unless you tap Mic.
+            Privacy: mic only runs while you hold it.
           </Text>
 
           <View style={styles.heroLiveCard}>
@@ -405,17 +672,28 @@ export default function HomeScreen() {
           onClose={closeSheet}
           transcript={transcript}
           claims={claims}
-          onSubmitClaim={submitDirectClaim}
+          onSubmitClaim={handleDirectSubmit}
           onDashboardSubmit={(text) => {
             const t = text.trim();
             if (!t) return;
             setPendingQuickClaim(t);
-            submitDirectClaim(t);
-            setSheetMode("quick_verify");
+            if (isSubjectiveClaim(t)) {
+              console.log("SET pendingResponse TRUE at submit");
+              setPendingResponse(true);
+            }
+            handleDirectSubmit(t);
+            if (!isSubjectiveClaim(t) && !pendingResponse) {
+              setSheetMode("quick_verify");
+            }
           }}
           mode={sheetMode}
           initialDraft={sheetMode === "quick_verify" ? pendingQuickClaim : ""}
           quickVerifyTarget={sheetMode === "quick_verify" ? pendingQuickClaim : undefined}
+          pendingResponse={pendingResponse}
+          onPendingResolved={handlePendingResolved}
+          onStartPending={() => setPendingResponse(true)}
+          onDefendClaim={openQuickVerify}
+          onChallengeClaim={handleChallengeClaim}
         />
 
         {!sheetOpen && (
@@ -565,7 +843,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(34,211,238,0.30)",
   },
+  micBtnActive: {
+    backgroundColor: "rgba(255,77,77,0.16)",
+    borderColor: "rgba(255,77,77,0.42)",
+  },
   micBtnText: { color: "rgba(34,211,238,0.95)", fontWeight: "900" },
+  micBtnTextActive: { color: "#ffb4b4" },
   verifyBtn: {
     height: 48,
     paddingHorizontal: 18,
@@ -576,6 +859,12 @@ const styles = StyleSheet.create({
   },
   verifyBtnText: { color: "#031016", fontWeight: "900" },
 
+  voiceHintLine: {
+    marginTop: 10,
+    color: "rgba(34,211,238,0.95)",
+    fontSize: 12,
+    fontWeight: "900",
+  },
   privacyLine: { marginTop: 10, color: COLORS.text3, fontSize: 12 },
 
   heroLiveCard: {
