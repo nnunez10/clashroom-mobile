@@ -11,7 +11,7 @@ import {
   View,
 } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
-import { runOnJS } from "react-native-reanimated";
+import Animated, { runOnJS, useAnimatedStyle, useSharedValue } from "react-native-reanimated";
 import type {
   SpeechErrorEvent,
   SpeechResultsEvent,
@@ -116,7 +116,7 @@ export default function HomeScreen() {
   const speechActiveRef = useRef(false);
   const speechSessionRef = useRef(0);
   const speechEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
+  const isListeningShared = useSharedValue(false);
 
   const {
     transcript,
@@ -251,8 +251,10 @@ export default function HomeScreen() {
     clearSpeechEndTimer();
     speechTextRef.current = "";
     speechActiveRef.current = true;
-    setIsListeningForClaim(true);
-    setVoiceHint("Listening... release to draft.");
+    // Do NOT update React state here — any setState before the first await
+    // triggers a re-render during the await gap, which causes GestureDetector
+    // to re-attach and reset the active LongPress gesture. Visual state is
+    // driven by isListeningShared (set in the gesture worklet, no re-render).
 
     try {
       const voice = await getVoice();
@@ -260,6 +262,10 @@ export default function HomeScreen() {
         console.log("[PushToClaim] aborted after getVoice — session:", speechSessionRef.current, "expected:", sessionId, "active:", speechActiveRef.current);
         return;
       }
+
+      // Safe to update React state here — gesture is past the startup gap.
+      setIsListeningForClaim(true);
+      setVoiceHint("Listening... release to draft.");
 
       if (!voice) {
         speechActiveRef.current = false;
@@ -335,19 +341,33 @@ export default function HomeScreen() {
   const callStart = useCallback(() => { startPushToClaimRef.current(); }, []);
   const callStop = useCallback(() => { stopPushToClaimRef.current(); }, []);
 
+  const micBtnAnimStyle = useAnimatedStyle(() => ({
+    backgroundColor: isListeningShared.value
+      ? "rgba(255,77,77,0.16)"
+      : "rgba(34,211,238,0.10)",
+    borderColor: isListeningShared.value
+      ? "rgba(255,77,77,0.42)"
+      : "rgba(34,211,238,0.30)",
+  }));
+  const micBtnTextAnimStyle = useAnimatedStyle(() => ({
+    color: isListeningShared.value ? "#ffb4b4" : "rgba(34,211,238,0.95)",
+  }));
+
   const micGesture = useMemo(() =>
     Gesture.LongPress()
       .minDuration(0)
       .maxDistance(999)
       .onStart(() => {
         "worklet";
+        isListeningShared.value = true;
         runOnJS(callStart)();
       })
       .onFinalize(() => {
         "worklet";
+        isListeningShared.value = false;
         runOnJS(callStop)();
       }),
-    [callStart, callStop]
+    [callStart, callStop, isListeningShared]
   );
 
   useEffect(() => {
@@ -506,7 +526,6 @@ export default function HomeScreen() {
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
-        scrollEnabled={!isListeningForClaim}
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.topRow}>
@@ -539,20 +558,15 @@ export default function HomeScreen() {
             />
 
             <GestureDetector gesture={micGesture}>
-              <View
-                style={[styles.micBtn, isListeningForClaim && styles.micBtnActive]}
+              <Animated.View
+                style={[styles.micBtn, micBtnAnimStyle]}
                 accessibilityRole="button"
                 accessibilityLabel="Press and hold to speak a claim"
               >
-                <Text
-                  style={[
-                    styles.micBtnText,
-                    isListeningForClaim && styles.micBtnTextActive,
-                  ]}
-                >
+                <Animated.Text style={[styles.micBtnText, micBtnTextAnimStyle]}>
                   {isListeningForClaim ? "Release" : "Mic"}
-                </Text>
-              </View>
+                </Animated.Text>
+              </Animated.View>
             </GestureDetector>
 
             <Pressable onPress={submitQuickVerify} style={styles.verifyBtn} hitSlop={10}>
