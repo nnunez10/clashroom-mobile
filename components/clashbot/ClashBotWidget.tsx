@@ -1,10 +1,11 @@
 // components/clashbot/ClashBotWidget.tsx
 
 import { LinearGradient } from "expo-linear-gradient";
-import React, { useEffect, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo } from "react";
 import { Pressable, StyleProp, StyleSheet, Text, View, ViewStyle, useWindowDimensions } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
+  runOnJS,
   useAnimatedReaction,
   useAnimatedStyle,
   useSharedValue,
@@ -21,6 +22,9 @@ type ClashBotWidgetProps = {
   subtitle?: string;
   activeCount?: number;
   onPress?: () => void;
+  onHoldStart?: () => void;
+  onHoldEnd?: () => void;
+  listening?: boolean;
   size?: number;
   initialSide?: "left" | "right";
   margin?: number;
@@ -37,6 +41,9 @@ export default function ClashBotWidget({
   subtitle,
   activeCount = 0,
   onPress,
+  onHoldStart,
+  onHoldEnd,
+  listening = false,
   size = 64,
   initialSide = "right",
   margin = 14,
@@ -65,6 +72,9 @@ export default function ClashBotWidget({
   const scale = useSharedValue(1);
   const glow = useSharedValue(0);
   const pulse = useSharedValue(0);
+
+  const callHoldStart = useCallback(() => { onHoldStart?.(); }, [onHoldStart]);
+  const callHoldEnd = useCallback(() => { onHoldEnd?.(); }, [onHoldEnd]);
 
   const minX = useSharedValue(bounds.minX);
   const maxX = useSharedValue(bounds.maxX);
@@ -113,13 +123,15 @@ export default function ClashBotWidget({
   }[tone];
 
   const toneLabel =
-    tone === "checking"
+    listening
+      ? "Listening..."
+      : tone === "checking"
       ? "Checking..."
       : tone === "verified"
       ? "Receipts ready"
       : tone === "disputed"
       ? "Disputed"
-      : subtitle?.trim() || "Tap to verify";
+      : subtitle?.trim() || "Hold to speak";
 
   useEffect(() => {
     if (tone === "checking") {
@@ -131,20 +143,24 @@ export default function ClashBotWidget({
     }
   }, [tone, pulse]);
 
-  const pan = Gesture.Pan()
+  // All closure values are stable useSharedValue refs — safe to memoize with [].
+  const pan = useMemo(() => Gesture.Pan()
     .onBegin(() => {
+      "worklet";
       startXRef.value = x.value;
       startYRef.value = y.value;
       scale.value = withTiming(1.03, { duration: 120 });
       glow.value = withTiming(1, { duration: 120 });
     })
     .onUpdate((evt) => {
+      "worklet";
       const nextX = startXRef.value + evt.translationX;
       const nextY = startYRef.value + evt.translationY;
       x.value = clamp(nextX, minX.value, maxX.value);
       y.value = clamp(nextY, minY.value, maxY.value);
     })
     .onEnd((evt) => {
+      "worklet";
       const projectedX = x.value + evt.velocityX * 0.04;
       const projectedY = y.value + evt.velocityY * 0.04;
 
@@ -161,11 +177,31 @@ export default function ClashBotWidget({
       scale.value = withTiming(1, { duration: 180 });
     })
     .onFinalize(() => {
+      "worklet";
       scale.value = withTiming(1, { duration: 140 });
       glow.value = withTiming(0, { duration: 140 });
-    });
+    }),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  []);
 
-  const composed = pan;
+  const bubbleLongPress = useMemo(() =>
+    Gesture.LongPress()
+      .minDuration(350)
+      .onStart(() => {
+        "worklet";
+        runOnJS(callHoldStart)();
+      })
+      .onFinalize(() => {
+        "worklet";
+        runOnJS(callHoldEnd)();
+      }),
+    [callHoldStart, callHoldEnd]
+  );
+
+  const composed = useMemo(
+    () => onHoldStart ? Gesture.Race(pan, bubbleLongPress) : pan,
+    [pan, bubbleLongPress, onHoldStart]
+  );
 
   const animatedStyle = useAnimatedStyle(() => {
     return {
@@ -228,7 +264,9 @@ export default function ClashBotWidget({
           <Animated.View
             style={[
               styles.statusPill,
-              tone === "checking"
+              listening
+                ? styles.statusPillListening
+                : tone === "checking"
                 ? styles.statusPillChecking
                 : tone === "verified"
                 ? styles.statusPillVerified
@@ -315,6 +353,10 @@ const styles = StyleSheet.create({
   statusPillDefault: {
     backgroundColor: "rgba(7, 17, 23, 0.88)",
     borderColor: "rgba(255,255,255,0.14)",
+  },
+  statusPillListening: {
+    backgroundColor: "rgba(7, 17, 23, 0.92)",
+    borderColor: "rgba(255,77,77,0.52)",
   },
   statusPillChecking: {
     backgroundColor: "rgba(7, 17, 23, 0.92)",

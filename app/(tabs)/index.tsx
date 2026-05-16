@@ -620,6 +620,9 @@ export default function HomeScreen() {
             subtitle={widgetSubtitle}
             activeCount={activeClaimsCount}
             onPress={openDashboard}
+            onHoldStart={callStart}
+            onHoldEnd={callStop}
+            listening={isListeningForClaim}
             initialSide="right"
             style={styles.bubble}
           />
