@@ -42,7 +42,9 @@ const DNA_STOPWORDS = new Set([
   "my",
   "our",
   "their",
-  "not",
+  // "not" intentionally excluded: it inverts proposition truth value and must
+  // be preserved in family tokens so "X causes Y" and "X does not cause Y"
+  // receive different familyIds and are never silently merged or blocked.
   "no",
   "yes",
   "up",
@@ -212,12 +214,102 @@ export function getClaimDna(text: string) {
   };
 }
 
+// Matches contracted and expanded negation markers.
+// Used to guard against proposition-inverting claims being merged into the
+// same family — e.g. "vaccines cause autism" vs "vaccines do not cause autism".
+const NEGATION_RE =
+  /\b(not|never|neither|nor|nobody|nothing|nowhere|don'?t|doesn'?t|didn'?t|won'?t|can'?t|couldn'?t|wouldn'?t|shouldn'?t|isn'?t|aren'?t|wasn'?t|weren'?t|haven'?t|hasn'?t|hadn'?t)\b/i;
+
+function hasNegation(text: string): boolean {
+  return NEGATION_RE.test(String(text || ""));
+}
+
+// ── Directional-flip guard ────────────────────────────────────────────────────
+// Tier-1 only: clear asymmetric transitive verbs where swapping subject and
+// object produces a different real-world outcome ("Lakers beat Warriors" vs
+// "Warriors beat Lakers"). Causal verbs (caused, led to) and "lost to" are
+// deferred due to passive-voice and causation complexity.
+const DIRECTIONAL_VERB_PHRASES: string[][] = [
+  ["beat"],
+  ["defeated"],
+  ["bought"],
+  ["sold"],
+  ["endorsed"],
+  ["appointed"],
+  ["sued"],
+  ["killed"],
+  ["invaded"],
+];
+
+// When these tokens are present, the syntactic subject/object inversion is
+// structural (passive voice), not semantic. Skip the directional check so
+// "Warriors were beaten by Lakers" still groups with "Lakers beat Warriors".
+const PASSIVE_TOKENS = new Set(["was", "were", "been", "being", "by"]);
+
+function findVerbPosition(tokens: string[], verbWords: string[]): number {
+  // eslint-disable-next-line no-labels
+  outer: for (let i = 0; i <= tokens.length - verbWords.length; i++) {
+    for (let j = 0; j < verbWords.length; j++) {
+      // eslint-disable-next-line no-labels
+      if (tokens[i + j] !== verbWords[j]) continue outer;
+    }
+    return i;
+  }
+  return -1;
+}
+
+function extractMeaningful(tokens: string[]): string[] {
+  return tokens
+    .map(normalizeToken)
+    .filter((t) => t.length >= 3 && !DNA_STOPWORDS.has(t));
+}
+
+function isDirectionalFlip(a: string, b: string): boolean {
+  const tokA = tokenizeClaimText(a);
+  const tokB = tokenizeClaimText(b);
+
+  // Passive constructions legitimately invert syntactic subject/object;
+  // skip the directional check and let the overlap logic decide.
+  if (tokA.some((t) => PASSIVE_TOKENS.has(t)) || tokB.some((t) => PASSIVE_TOKENS.has(t))) {
+    return false;
+  }
+
+  for (const verbWords of DIRECTIONAL_VERB_PHRASES) {
+    const posA = findVerbPosition(tokA, verbWords);
+    const posB = findVerbPosition(tokB, verbWords);
+    if (posA === -1 || posB === -1) continue;
+
+    const beforeA = extractMeaningful(tokA.slice(0, posA));
+    const afterA  = extractMeaningful(tokA.slice(posA + verbWords.length));
+    const beforeB = extractMeaningful(tokB.slice(0, posB));
+    const afterB  = extractMeaningful(tokB.slice(posB + verbWords.length));
+
+    // Fail-safe: if any side has no meaningful tokens (subject/object is
+    // entirely stopwords or too short), skip rather than misfire.
+    if (!beforeA.length || !afterA.length || !beforeB.length || !afterB.length) continue;
+
+    const subjectMatch = tokenSetOverlap(beforeA, afterB) >= 0.5;
+    const objectMatch  = tokenSetOverlap(afterA,  beforeB) >= 0.5;
+    if (subjectMatch && objectMatch) return true;
+  }
+  return false;
+}
+
 export function areClaimsInSameFamily(a: string, b: string) {
   const dnaA = getClaimDna(a);
   const dnaB = getClaimDna(b);
 
   if (!dnaA.normalized || !dnaB.normalized) return false;
+
+  // Claims that differ in negation polarity are contradictions, not paraphrases.
+  // Keep them in separate families so neither blocks the other from being verified.
+  if (hasNegation(a) !== hasNegation(b)) return false;
+
   if (dnaA.normalized === dnaB.normalized) return true;
+
+  // Claims where subject and object are swapped around a directional verb are
+  // different propositions, not paraphrases.
+  if (isDirectionalFlip(a, b)) return false;
 
   if (dnaA.familyFingerprint && dnaA.familyFingerprint === dnaB.familyFingerprint) {
     return true;
