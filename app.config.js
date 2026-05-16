@@ -1,40 +1,6 @@
 // app.config.js
 
-const { withAndroidManifest } = require("@expo/config-plugins");
 require("dotenv").config();
-
-/**
- * Fix for Android Manifest merger conflict:
- * Adds tools:replace="android:appComponentFactory"
- * to the <application> element.
- */
-function withAppComponentFactoryFix(config) {
-  return withAndroidManifest(config, (config) => {
-    const manifest = config.modResults.manifest;
-
-    // Ensure xmlns:tools exists on <manifest>
-    manifest.$ = manifest.$ || {};
-    if (!manifest.$["xmlns:tools"]) {
-      manifest.$["xmlns:tools"] = "http://schemas.android.com/tools";
-    }
-
-    const app = manifest.application?.[0];
-
-    if (app) {
-      app.$ = app.$ || {};
-
-      const existing = app.$["tools:replace"];
-
-      if (!existing) {
-        app.$["tools:replace"] = "android:appComponentFactory";
-      } else if (!existing.includes("android:appComponentFactory")) {
-        app.$["tools:replace"] = `${existing},android:appComponentFactory`;
-      }
-    }
-
-    return config;
-  });
-}
 
 function env(name, fallback = "") {
   const v = process.env[name];
@@ -103,7 +69,6 @@ module.exports = ({ config }) => {
    * Expo Plugins
    */
   config.plugins = [
-    withAppComponentFactoryFix,
     [
       "expo-build-properties",
       {
