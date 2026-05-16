@@ -102,7 +102,26 @@ module.exports = ({ config }) => {
   /**
    * Expo Plugins
    */
-  config.plugins = [withAppComponentFactoryFix];
+  config.plugins = [
+    withAppComponentFactoryFix,
+    [
+      "expo-build-properties",
+      {
+        android: {
+          usesCleartextTraffic: true,
+        },
+      },
+    ],
+    [
+      "expo-speech-recognition",
+      {
+        microphonePermission:
+          "Allow ClashRoom to use the microphone for push-to-claim drafts.",
+        speechRecognitionPermission:
+          "Allow ClashRoom to turn speech into claim drafts.",
+      },
+    ],
+  ];
 
   /**
    * Extra config (EAS + API keys + feature flags)
@@ -110,6 +129,9 @@ module.exports = ({ config }) => {
    *   Constants.expoConfig?.extra
    */
   const appEnv = env("APP_ENV", "development");
+
+  // [DEBUG] Remove before shipping.
+  console.log("[app.config.js] SERPAPI_KEY in config:", env("SERPAPI_KEY") ? "present (" + env("SERPAPI_KEY").slice(0,6) + "...)" : "MISSING");
 
   config.extra = {
     ...(config.extra || {}),

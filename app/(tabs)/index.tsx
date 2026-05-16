@@ -2,7 +2,6 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -12,10 +11,7 @@ import {
 } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue } from "react-native-reanimated";
-import type {
-  SpeechErrorEvent,
-  SpeechResultsEvent,
-} from "@react-native-voice/voice";
+import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
 import ClashBotSheet from "../../components/clashbot/ClashBotSheet";
 import ClashBotWidget from "../../components/clashbot/ClashBotWidget";
 import { isSubjectiveClaim } from "../../lib/clashbot/subjectiveClash";
@@ -23,7 +19,6 @@ import { useMockClashBotEngine } from "../../lib/clashbot/useMockClashBotEngine"
 
 type SheetMode = "dashboard" | "quick_verify";
 type WidgetTone = "unverified" | "checking" | "verified" | "disputed";
-type VoiceModule = typeof import("@react-native-voice/voice").default;
 
 const COLORS = {
   bg: "#06141A",
@@ -111,7 +106,6 @@ export default function HomeScreen() {
   const [isListeningForClaim, setIsListeningForClaim] = useState(false);
   const [voiceHint, setVoiceHint] = useState("PRESS + HOLD TO TALK");
   const userSubmittedTextsRef = useRef<Set<string>>(new Set());
-  const voiceRef = useRef<VoiceModule | null>(null);
   const speechTextRef = useRef("");
   const speechActiveRef = useRef(false);
   const speechSessionRef = useRef(0);
@@ -162,30 +156,14 @@ export default function HomeScreen() {
     speechEndTimerRef.current = null;
   }
 
-  function rememberSpeechResult(event?: SpeechResultsEvent) {
-    const next = event?.value?.[0]?.trim();
-    if (next) speechTextRef.current = next;
-  }
-
-  function speechErrorMessage(eventOrError: SpeechErrorEvent | unknown) {
-    const raw =
-      typeof eventOrError === "object" && eventOrError !== null && "error" in eventOrError
-        ? JSON.stringify((eventOrError as SpeechErrorEvent).error)
-        : String(eventOrError ?? "");
-    const lower = raw.toLowerCase();
-
-    if (lower.includes("permission") || lower.includes("denied")) {
-      return "Mic permission denied. Enable it to speak a claim.";
+  function speechErrorMessage(code: string) {
+    const lower = code.toLowerCase();
+    if (lower.includes("permission") || lower.includes("not-allowed") || lower.includes("denied")) {
+      return "Mic permission denied. Enable it in settings.";
     }
-
-    if (lower.includes("no speech") || lower.includes("didn't hear")) {
+    if (lower.includes("no-speech") || lower.includes("audio-capture")) {
       return "Didn't catch that. Hold and try again.";
     }
-
-    if (lower.includes("available") || lower.includes("native module")) {
-      return "Speech recognition is not available in this build.";
-    }
-
     return "Could not transcribe that. Try again.";
   }
 
@@ -204,131 +182,51 @@ export default function HomeScreen() {
     setVoiceHint("Draft ready. Hit Verify.");
   }
 
-  async function getVoice() {
-    if (Platform.OS === "web") return null;
-
-    if (!voiceRef.current) {
-      const mod = await import("@react-native-voice/voice");
-      voiceRef.current = mod.default;
-    }
-
-    const voice = voiceRef.current;
-    voice.onSpeechPartialResults = rememberSpeechResult;
-    voice.onSpeechResults = (event) => {
-      console.log("[PushToClaim] speech results", event?.value);
-      rememberSpeechResult(event);
-      commitSpeechDraft();
-    };
-    voice.onSpeechEnd = () => {
-      console.log("[PushToClaim] speech end");
-      clearSpeechEndTimer();
-      speechEndTimerRef.current = setTimeout(commitSpeechDraft, 450);
-    };
-    voice.onSpeechError = (event) => {
-      console.log("[PushToClaim] speech error", event?.error);
-      clearSpeechEndTimer();
-      rememberSpeechResult();
-      speechActiveRef.current = false;
-      setIsListeningForClaim(false);
-
-      if (speechTextRef.current.trim()) {
-        commitSpeechDraft();
-        return;
-      }
-
-      setVoiceHint(speechErrorMessage(event));
-    };
-
-    return voice;
-  }
-
-  async function startPushToClaim() {
+  function startPushToClaim() {
     if (speechActiveRef.current) return;
-
     console.log("[PushToClaim] mic press start");
-    const sessionId = speechSessionRef.current + 1;
-    speechSessionRef.current = sessionId;
+    speechSessionRef.current += 1;
     clearSpeechEndTimer();
     speechTextRef.current = "";
     speechActiveRef.current = true;
-    // Do NOT update React state here — any setState before the first await
-    // triggers a re-render during the await gap, which causes GestureDetector
-    // to re-attach and reset the active LongPress gesture. Visual state is
-    // driven by isListeningShared (set in the gesture worklet, no re-render).
-
-    try {
-      const voice = await getVoice();
-      if (speechSessionRef.current !== sessionId || !speechActiveRef.current) {
-        console.log("[PushToClaim] aborted after getVoice — session:", speechSessionRef.current, "expected:", sessionId, "active:", speechActiveRef.current);
-        return;
-      }
-
-      // Safe to update React state here — gesture is past the startup gap.
-      setIsListeningForClaim(true);
-      setVoiceHint("Listening... release to draft.");
-
-      if (!voice) {
-        speechActiveRef.current = false;
-        setIsListeningForClaim(false);
-        setVoiceHint("Mic claims need iOS or Android.");
-        return;
-      }
-
-      const available = await voice.isAvailable();
-      console.log("[PushToClaim] isAvailable:", available);
-      if (speechSessionRef.current !== sessionId || !speechActiveRef.current) {
-        console.log("[PushToClaim] aborted after isAvailable — session:", speechSessionRef.current, "expected:", sessionId);
-        return;
-      }
-
-      if (!available) {
-        speechActiveRef.current = false;
-        setIsListeningForClaim(false);
-        setVoiceHint("Speech recognition is not available on this device.");
-        return;
-      }
-
-      console.log("[PushToClaim] Voice.start");
-      await voice.start("en-US");
-      if (speechSessionRef.current !== sessionId || !speechActiveRef.current) {
-        console.log("[PushToClaim] Voice.stop after canceled start");
-        await voice.stop().catch(() => undefined);
-      }
-    } catch (error) {
-      speechActiveRef.current = false;
-      setIsListeningForClaim(false);
-      setVoiceHint(speechErrorMessage(error));
-    }
+    setIsListeningForClaim(true);
+    setVoiceHint("Listening... release to draft.");
+    ExpoSpeechRecognitionModule.start({ lang: "en-US", interimResults: true });
   }
 
-  async function stopPushToClaim() {
+  function stopPushToClaim() {
     if (!speechActiveRef.current) return;
     speechActiveRef.current = false;
-
     console.log("[PushToClaim] mic release");
     setVoiceHint("Drafting claim...");
     clearSpeechEndTimer();
     speechEndTimerRef.current = setTimeout(commitSpeechDraft, 1200);
-
-    if (!voiceRef.current) {
-      commitSpeechDraft();
-      return;
-    }
-
-    try {
-      console.log("[PushToClaim] Voice.stop");
-      await voiceRef.current.stop();
-    } catch (error) {
-      if (speechTextRef.current.trim()) {
-        commitSpeechDraft();
-        return;
-      }
-
-      speechActiveRef.current = false;
-      setIsListeningForClaim(false);
-      setVoiceHint(speechErrorMessage(error));
-    }
+    ExpoSpeechRecognitionModule.stop();
   }
+
+  useSpeechRecognitionEvent("result", (event) => {
+    const text = event.results?.[0]?.transcript?.trim();
+    console.log("[PushToClaim] result", text, "final:", event.isFinal);
+    if (text) speechTextRef.current = text;
+    if (event.isFinal && speechActiveRef.current) commitSpeechDraft();
+  });
+
+  useSpeechRecognitionEvent("end", () => {
+    console.log("[PushToClaim] end");
+    if (!speechActiveRef.current) return;
+    clearSpeechEndTimer();
+    speechEndTimerRef.current = setTimeout(commitSpeechDraft, 450);
+  });
+
+  useSpeechRecognitionEvent("error", (event) => {
+    console.log("[PushToClaim] error", event.error);
+    if (!speechActiveRef.current) return;
+    clearSpeechEndTimer();
+    speechActiveRef.current = false;
+    setIsListeningForClaim(false);
+    if (speechTextRef.current.trim()) { commitSpeechDraft(); return; }
+    setVoiceHint(speechErrorMessage(event.error));
+  });
 
   // Refs hold the latest function versions but are never passed into worklets.
   const startPushToClaimRef = useRef(startPushToClaim);
@@ -373,11 +271,7 @@ export default function HomeScreen() {
   useEffect(() => {
     return () => {
       clearSpeechEndTimer();
-      const voice = voiceRef.current;
-      if (!voice) return;
-
-      voice.destroy().catch(() => undefined);
-      voice.removeAllListeners();
+      ExpoSpeechRecognitionModule.abort();
     };
   }, []);
 
