@@ -17,7 +17,125 @@ export type ExplanationInput = {
   confidenceTier?: ConfidenceTier;
   /** Clustered (deduplicated) match count. Use representativeCount, not raw match count. */
   representativeCount?: number;
+  /**
+   * Provider mode from the router. Accepts both raw ("fact_check", "recent_coverage")
+   * and normalised ("factcheck", "news") forms so callers don't need to convert.
+   */
+  mode?: string;
 };
+
+// ---------------------------------------------------------------------------
+// Result meta — surface-agnostic trust/context labels
+// ---------------------------------------------------------------------------
+
+/**
+ * High-level result category, distinct from the internal `mode` field.
+ *   "fact_check"        — a formal fact-check database review was matched.
+ *   "breaking_coverage" — live/recent news coverage matched the claim.
+ *   "mixed"             — unclear, developing, or insufficient evidence.
+ */
+export type ResultType = "breaking_coverage" | "fact_check" | "mixed";
+
+/**
+ * Human-readable confidence label derived from `confidenceTier`.
+ * Suitable for display on any surface (text, voice, cross-app).
+ */
+export type ConfidenceLabel = "High confidence" | "Moderate confidence" | "Developing";
+
+export type ResultMeta = {
+  resultType: ResultType;
+  confidenceLabel: ConfidenceLabel;
+  /**
+   * One short sentence explaining why this result was selected — based entirely
+   * on existing pipeline signals. Surfaces the key trust factor in plain language.
+   *
+   * Examples:
+   *   "A formal fact-check result with a clear verdict matched this claim."
+   *   "Recent coverage from multiple sources matched the claim."
+   *   "Coverage exists, but reporting is still developing."
+   */
+  shortWhyItWon: string;
+};
+
+/**
+ * Derives the three surface-agnostic trust/context labels from existing
+ * verification signals. Pure function — no network calls, no state.
+ *
+ * Intended to be called after buildVerificationFromResult and attached to the
+ * output object so every consumer (text UI, voice, cross-app) gets the same
+ * pre-computed labels without duplicating logic.
+ */
+export function getResultMeta(input: ExplanationInput): ResultMeta {
+  const {
+    status,
+    stance,
+    reasonCode,
+    confidenceTier,
+    representativeCount = 0,
+    mode,
+  } = input;
+
+  // ---- confidenceLabel -------------------------------------------------------
+  const confidenceLabel: ConfidenceLabel =
+    confidenceTier === "high"   ? "High confidence"     :
+    confidenceTier === "medium" ? "Moderate confidence" :
+    "Developing";
+
+  // ---- resultType ------------------------------------------------------------
+  // Fact-check: authoritative source (Google FC / known fact) or fact-check mode.
+  const isFactCheck =
+    mode === "fact_check" || mode === "factcheck" ||
+    reasonCode === "authoritative_contradiction" ||
+    reasonCode === "authoritative_support";
+
+  // Breaking coverage: news/search provider or coverage-type reason code.
+  const isCoverage =
+    !isFactCheck && (
+      mode === "recent_coverage" || mode === "news" ||
+      reasonCode === "coverage_support" ||
+      reasonCode === "coverage_contradiction"
+    );
+
+  const resultType: ResultType =
+    isFactCheck ? "fact_check" :
+    isCoverage  ? "breaking_coverage" :
+    "mixed";
+
+  // ---- shortWhyItWon ---------------------------------------------------------
+  let shortWhyItWon: string;
+
+  if (status === "error" || reasonCode === "provider_error") {
+    shortWhyItWon = "Verification could not complete.";
+  } else if (status === "no_match" || reasonCode === "no_reliable_match") {
+    shortWhyItWon = "No reliable source matched this claim.";
+  } else if (reasonCode === "source_not_relevant") {
+    shortWhyItWon = "A source was found, but it doesn't closely match this claim.";
+  } else if (reasonCode === "mixed_evidence") {
+    shortWhyItWon = "Sources disagree — reporting is ongoing.";
+  } else if (reasonCode === "insufficient_evidence") {
+    shortWhyItWon = "Coverage exists, but reporting is still developing.";
+  } else if (resultType === "fact_check") {
+    if (stance === "contradicted" || stance === "supported") {
+      shortWhyItWon = confidenceTier === "high"
+        ? "A formal fact-check result with a clear verdict matched this claim."
+        : "A fact-check source reviewed this claim.";
+    } else {
+      shortWhyItWon = "Fact-checkers found this claim, but the verdict is unclear.";
+    }
+  } else if (resultType === "breaking_coverage") {
+    if (representativeCount >= 2) {
+      shortWhyItWon = "Recent coverage from multiple sources matched the claim.";
+    } else if (stance === "supported" || stance === "contradicted") {
+      shortWhyItWon = "A recent source with a clear position covered this claim.";
+    } else {
+      shortWhyItWon = "Coverage exists, but reporting is still developing.";
+    }
+  } else {
+    shortWhyItWon = "Coverage exists, but reporting is still developing.";
+  }
+
+  return { resultType, confidenceLabel, shortWhyItWon };
+}
 
 /**
  * Returns a single short sentence explaining the verification result, or null

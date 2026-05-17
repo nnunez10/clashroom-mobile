@@ -9,12 +9,29 @@
 //
 // Re-exports the three domain types so callers can import from one place.
 
-import type { FactCheckMatch } from "./types";
-import { findKnownFactOverride } from "./knownFacts";
-import type { ConfidenceTier, EvidenceRecord, ReasonCode, RelevanceAssessment, Stance } from "../claim/types";
+import type {
+  ClaimType,
+  ConfidenceTier,
+  ConsensusStrength,
+  DisplayVerdict,
+  EvidenceDirectness,
+  EvidenceRecord,
+  EvidenceStance,
+  Freshness,
+  ReasonCode,
+  RelevanceAssessment,
+  SourceDiversity,
+  Stance,
+  VerdictKind,
+  VerdictTone,
+  VerdictTrace,
+} from "../claim/types";
 import { clusterEvidence } from "./evidenceClustering";
+import { findKnownFactOverride } from "./knownFacts";
+import { getResultMeta } from "./resultExplanation";
+import type { FactCheckMatch } from "./types";
 
-export type { ConfidenceTier, EvidenceRecord, ReasonCode, RelevanceAssessment, Stance };
+export type { ClaimType, ConfidenceTier, DisplayVerdict, EvidenceRecord, ReasonCode, RelevanceAssessment, Stance, VerdictTrace };
 
 // ---------------------------------------------------------------------------
 // Utilities — exported so useMockClashBotEngine can re-import them.
@@ -236,6 +253,43 @@ function providerRank(provider: string): number {
   return 3;
 }
 
+// ---------------------------------------------------------------------------
+// Source quality tiers — used by matchQualityScore to prefer reputable outlets
+// over low-quality blogs when all other signals are equal.
+// Matched against the URL hostname (www. stripped).
+// ---------------------------------------------------------------------------
+
+const SOURCE_TIER_1 = new Set([
+  // Wire services / financial press: fastest on breaking events, minimal editorial lag
+  "reuters.com", "apnews.com", "bloomberg.com", "ft.com", "wsj.com",
+]);
+
+const SOURCE_TIER_2 = new Set([
+  // Major broadcast / print
+  "bbc.com", "bbc.co.uk", "cnn.com", "nytimes.com",
+  "washingtonpost.com", "theguardian.com", "npr.org",
+  "economist.com", "time.com", "newsweek.com", "cbsnews.com",
+  "abc.net.au",
+]);
+
+const SOURCE_TIER_3 = new Set([
+  // Credible digital-native / cable
+  "politico.com", "axios.com", "thehill.com",
+  "abcnews.go.com", "nbcnews.com", "foxnews.com",
+  "usatoday.com", "pbs.org", "vox.com", "theatlantic.com",
+  "msnbc.com", "independent.co.uk", "sky.com", "euronews.com",
+]);
+
+function sourceQualityBonus(m: any): number {
+  const url = safeString(m?.url);
+  let domain = "";
+  try { domain = url ? new URL(url).hostname.replace(/^www\./, "") : ""; } catch {}
+  if (SOURCE_TIER_1.has(domain)) return 15;
+  if (SOURCE_TIER_2.has(domain)) return 10;
+  if (SOURCE_TIER_3.has(domain)) return 5;
+  return 0;
+}
+
 function matchQualityScore(m: any): number {
   const provider = safeString(m?.provider) || "unknown";
   let score = (3 - providerRank(provider)) * 20;
@@ -244,6 +298,7 @@ function matchQualityScore(m: any): number {
   if (safeString(m?.url)) score += 5;
   if (safeString(m?.publisher)) score += 3;
   if (safeString(m?.title)) score += 2;
+  score += sourceQualityBonus(m);
   return score;
 }
 
@@ -287,6 +342,14 @@ function scoreMatchForClaim(claimText: string, m: any): number {
     }
   }
 
+  // SerpAPI organic position: Google's own relevance ranking is a meaningful
+  // signal. Position 1 (top result) gets +10, decaying by 2 per position.
+  // pos 1→+10, 2→+8, 3→+6, 4→+4, 5→+2, 6+→0
+  const serpPos = typeof m?.serpApiPosition === "number" ? m.serpApiPosition : 0;
+  if (serpPos > 0) {
+    score += Math.max(0, 10 - (serpPos - 1) * 2);
+  }
+
   return score;
 }
 
@@ -296,6 +359,165 @@ function pickTopMatch(matches: any[] | undefined, claimText?: string): any | und
     ? (m: any) => scoreMatchForClaim(claimText, m)
     : matchQualityScore;
   return [...matches].sort((a, b) => scoreFn(b) - scoreFn(a))[0];
+}
+
+// ---------------------------------------------------------------------------
+// Claim anchor extraction and link-alignment scoring
+// ---------------------------------------------------------------------------
+
+// Event verbs used when extracting the "what" anchor from a claim. Broader
+// than TEMPORAL_VERBS — includes speech acts ("said", "denied") so statement
+// claims are covered alongside action claims.
+const ANCHOR_VERB_RE =
+  /\b(fired|dismissed|ousted|removed|replaced|resigned|quit|appointed|named|selected|arrested|detained|indicted|charged|sentenced|passed|signed|enacted|approved|rejected|vetoed|announced|declared|launched|released|banned|suspended|impeached|elected|died|killed|crashed|collapsed|said|claimed|stated|confirmed|denied|accused|warned)\b/gi;
+
+// Time markers used for the "when" anchor.
+const ANCHOR_TIME_RE =
+  /\b(today|yesterday|just|now|recently|this week|this month|this year|last week|last month|breaking|latest)\b/gi;
+
+// Synonym groups for common event verbs.
+// When a claim uses a verb in a group, ALL synonyms are added to the "what"
+// anchor so articles using equivalent language still produce a hit in
+// scoreAlignment — no NLP, just a hardcoded equivalence map.
+const VERB_SYNONYM_GROUPS: Readonly<Record<string, readonly string[]>> = {
+  // removal / termination
+  fired:       ["fired", "ousted", "dismissed", "removed", "replaced", "terminated", "forced out"],
+  ousted:      ["fired", "ousted", "dismissed", "removed", "replaced", "terminated", "forced out"],
+  dismissed:   ["fired", "ousted", "dismissed", "removed", "replaced", "terminated", "forced out"],
+  removed:     ["fired", "ousted", "dismissed", "removed", "replaced", "terminated", "forced out"],
+  replaced:    ["fired", "ousted", "dismissed", "removed", "replaced", "terminated", "forced out"],
+  terminated:  ["fired", "ousted", "dismissed", "removed", "replaced", "terminated", "forced out"],
+  // resignation / departure
+  resigned:    ["resigned", "quit", "stepped down", "departed", "left"],
+  quit:        ["resigned", "quit", "stepped down", "departed", "left"],
+  // appointment / selection
+  appointed:   ["appointed", "named", "selected", "tapped", "confirmed", "nominated", "chosen"],
+  named:       ["appointed", "named", "selected", "tapped", "confirmed", "nominated", "chosen"],
+  selected:    ["appointed", "named", "selected", "tapped", "confirmed", "nominated", "chosen"],
+  // arrest / detention
+  arrested:    ["arrested", "detained", "apprehended", "taken into custody", "held"],
+  detained:    ["arrested", "detained", "apprehended", "taken into custody", "held"],
+  // legal charges
+  indicted:    ["indicted", "charged", "accused", "prosecuted"],
+  charged:     ["indicted", "charged", "accused", "prosecuted"],
+  // speech / statement
+  said:        ["said", "stated", "announced", "declared", "claimed", "posted", "tweeted"],
+  stated:      ["said", "stated", "announced", "declared", "claimed", "posted", "tweeted"],
+  announced:   ["announced", "said", "declared", "revealed", "confirmed", "stated"],
+  declared:    ["announced", "said", "declared", "revealed", "confirmed", "stated"],
+  // prohibition / suspension
+  banned:      ["banned", "suspended", "barred", "blocked", "prohibited"],
+  suspended:   ["banned", "suspended", "barred", "blocked", "prohibited"],
+  // legislation
+  passed:      ["passed", "enacted", "signed", "approved", "adopted"],
+  signed:      ["passed", "enacted", "signed", "approved", "adopted"],
+  enacted:     ["passed", "enacted", "signed", "approved", "adopted"],
+  approved:    ["passed", "enacted", "signed", "approved", "adopted"],
+  // election / victory
+  elected:     ["elected", "won", "voted in"],
+  won:         ["elected", "won", "voted in"],
+};
+
+interface ClaimAnchors {
+  /** Named entities: ALL-CAPS acronyms + multi-word title-case phrases. */
+  who: string[];
+  /**
+   * Event verbs expanded to synonym groups + up to 3 significant topic nouns.
+   * Synonym expansion means "fired" in the claim also matches "ousted" in an article.
+   */
+  what: string[];
+  /** Explicit time words or recency markers. */
+  when: string[];
+}
+
+/**
+ * Extracts structured anchors from a claim string.
+ * Returns three buckets (who/what/when) used by scoreAlignment to decide
+ * how well a provider match covers the claim.
+ *
+ * The "what" bucket is synonym-expanded: every verb matched from the claim is
+ * replaced by its full equivalence group so that articles using different but
+ * semantically equivalent verbs still produce a hit.
+ */
+function extractClaimAnchors(text: string): ClaimAnchors {
+  const who: string[] = [];
+  for (const m of text.match(/\b[A-Z]{2,}\b/g) || []) who.push(m);
+  for (const m of text.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b/g) || []) who.push(m);
+
+  const what: string[] = [];
+  // Collect raw verbs from the claim, then expand each to its synonym group.
+  const expandedVerbs = new Set<string>();
+  for (const m of text.match(ANCHOR_VERB_RE) || []) {
+    const v = m.toLowerCase();
+    const group = VERB_SYNONYM_GROUPS[v];
+    if (group) {
+      for (const syn of group) expandedVerbs.add(syn);
+    } else {
+      expandedVerbs.add(v);
+    }
+  }
+  what.push(...expandedVerbs);
+
+  // Significant topic nouns that aren't already covered by a named entity.
+  const entityLower = new Set(who.map((e) => e.toLowerCase()));
+  const topicNouns = meaningfulTokens(text)
+    .filter((t) => t.length >= 4 && !Array.from(entityLower).some((e) => e.includes(t)));
+  what.push(...topicNouns.slice(0, 3));
+
+  const when: string[] = [];
+  for (const m of text.match(ANCHOR_TIME_RE) || []) when.push(m.toLowerCase());
+
+  return { who, what, when };
+}
+
+interface AlignmentResult {
+  tier: "strong" | "weak" | "reject";
+  matchWhy: string;
+}
+
+/**
+ * Scores how tightly a single provider match aligns with the claim anchors.
+ *
+ *   strong — ≥2 anchor categories hit (who+what, who+when, etc.)
+ *   weak   — exactly 1 anchor category hit
+ *   reject — no anchor found in title/snippet
+ *
+ * Also produces a human-readable `matchWhy` string, e.g.:
+ *   "Matched on Pam Bondi + firing"
+ *   "Matched on Trump + statement + Easter"
+ *   "Matched on gas prices + this month"
+ */
+function scoreAlignment(anchors: ClaimAnchors, match: any): AlignmentResult {
+  const haystack = [
+    safeString(match?.title),
+    safeString(match?.snippet),
+    safeString(match?.claim),
+    safeString(match?.claimReviewed),
+  ].join(" ").toLowerCase();
+
+  // Each entity requires ALL its words to appear (handles multi-word names).
+  const hitWho = anchors.who.filter((e) =>
+    e.split(/\s+/).every((w) => haystack.includes(w.toLowerCase()))
+  );
+  const hitWhat = anchors.what.filter((v) => haystack.includes(v));
+  const hitWhen = anchors.when.filter((t) => haystack.includes(t));
+
+  const categoriesHit = [hitWho.length > 0, hitWhat.length > 0, hitWhen.length > 0]
+    .filter(Boolean).length;
+
+  // Build a readable explanation from the matched anchors (max 3 items).
+  const parts = [
+    ...hitWho.slice(0, 2),
+    ...hitWhat.slice(0, 1),
+    ...hitWhen.slice(0, 1),
+  ].slice(0, 3);
+  const matchWhy = parts.length > 0
+    ? `Matched on ${parts.join(" + ")}`
+    : "No strong anchor match";
+
+  if (categoriesHit >= 2) return { tier: "strong", matchWhy };
+  if (categoriesHit === 1) return { tier: "weak",   matchWhy };
+  return { tier: "reject", matchWhy: "No strong anchor match" };
 }
 
 function normalizeMode(
@@ -518,17 +740,23 @@ export function classifyClaimStance(
   // and zero-vote evidence. The top rating is sourced from matchText
   // (candidateText) only — the previous duplicate of result.top.rating.text
   // is removed.
+  //
+  // Skip for news/recent_coverage results: article prose routinely contains
+  // SUPPORT_PHRASES ("true", "correct") in neutral context ("it's true that
+  // conspiracy theories persist") producing false verdicts.
   // ---------------------------------------------------------------------------
-  const combined = [safeString(matchText), safeString(result?.message)]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
+  if (result?.mode !== "recent_coverage") {
+    const combined = [safeString(matchText), safeString(result?.message)]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
 
-  const contradictionHits = countPhraseHits(combined, CONTRADICTION_PHRASES);
-  const supportHits = countPhraseHits(combined, SUPPORT_PHRASES);
+    const contradictionHits = countPhraseHits(combined, CONTRADICTION_PHRASES);
+    const supportHits = countPhraseHits(combined, SUPPORT_PHRASES);
 
-  if (contradictionHits > supportHits && contradictionHits >= 1) return "contradicted";
-  if (supportHits > contradictionHits && supportHits >= 1) return "supported";
+    if (contradictionHits > supportHits && contradictionHits >= 1) return "contradicted";
+    if (supportHits > contradictionHits && supportHits >= 1) return "supported";
+  }
 
   const claimNums = extractNumbers(claimText);
   const matchNums = extractNumbers(matchText);
@@ -721,31 +949,384 @@ function buildExplanation(supporting: number, contradicting: number): string {
  * Generates a short claim-aware summary from all matches.
  * Uses summarizeEvidence counts — no titles, no headlines, no external calls.
  *
- *   No matches                        → "No reliable evidence found."
- *   contradicting > supporting        → "Current reporting does not support this claim."
- *   supporting > contradicting        → "Available sources support this claim."
- *   both present (tied or mixed)      → "Sources show mixed or unclear information."
- *   only generic coverage (no ratings)→ "Recent coverage does not confirm this claim."
+ *   No matches                          → "🤷 No evidence"
+ *   supporting > contradicting          → "✅ Supported"
+ *   contradicting > supporting          → "❌ Not supported"
+ *   both present (mixed)                → "⚠️ Mixed signals"
+ *   coverage exists but no verdict      → "👀 Rumor heat"
+ *     (supporting === 0 && contradicting === 0, but matches exist)
+ *     These are articles that discuss the claim without issuing a verdict —
+ *     active coverage but no confirmation. Honest but engaging.
+ *
+ * Each verdict has its own fallback reason used when no usable snippet exists.
+ * When a top match has a snippet or title, appends " — <cleaned reason>".
  */
 export function buildSummary(matches: any[]): string {
   const all = Array.isArray(matches) ? matches : [];
-  if (all.length === 0) return "No reliable evidence found.";
+  if (all.length === 0) return "🤷 No evidence";
 
   const { supporting, contradicting } = summarizeEvidence(all);
 
+  let verdict: string;
+  let fallbackReason: string;
+
   if (supporting === 0 && contradicting === 0) {
-    return "Recent coverage does not confirm this claim.";
+    // Coverage exists but no source issued a verdict — weak evidence / rumor state.
+    verdict = "👀 Rumor heat";
+    fallbackReason = "people are talking, but there's no solid confirmation yet";
+  } else if (supporting > 0 && contradicting > 0) {
+    verdict = "⚠️ Mixed signals";
+    fallbackReason = "sources disagree on key details";
+  } else if (contradicting > supporting) {
+    verdict = "❌ Not supported";
+    fallbackReason = "recent coverage contradicts this claim";
+  } else {
+    verdict = "✅ Supported";
+    fallbackReason = "multiple sources confirm the claim";
   }
 
-  if (supporting > 0 && contradicting > 0) {
-    return "Sources show mixed or unclear information.";
+  // Append a cleaned context phrase from the top match (snippet preferred,
+  // title as fallback). Falls back to the verdict-specific phrase if nothing usable.
+  const top = all[0];
+  const raw: string = safeString(top?.snippet) || safeString(top?.title);
+  const reason = raw ? cleanSnippet(raw) : "";
+  return `${verdict} — ${reason || fallbackReason}`;
+}
+
+/**
+ * Cleans a raw snippet/title into a short, readable context phrase.
+ *
+ * Steps:
+ *  1. Strip trailing ellipsis artifacts ("...", "…")
+ *  2. Remove common filler phrases that add no context
+ *  3. Trim to ~100 chars at a word boundary
+ *  4. If the result is too short (<20 chars) return "" so the caller falls back
+ */
+function cleanSnippet(raw: string): string {
+  const FILLERS = [
+    /\baccording to( reports?| sources?| officials?)?\b[,:]?\s*/gi,
+    /\bsources?\s+say\b[,:]?\s*/gi,
+    /\bin an? (report|statement|interview|article|release)\b[,:]?\s*/gi,
+    /\breport(s|ing|edly)?\b[,:]?\s*/gi,
+    /\bit (has been|was) reported (that\s*)?/gi,
+    /\bfollowing (reports?|claims?)\b[,:]?\s*/gi,
+  ];
+
+  let s = raw.trim();
+
+  // 1. Strip trailing ellipsis artifacts
+  s = s.replace(/\.{2,}$/, "").replace(/…$/, "").trimEnd();
+
+  // 2. Remove filler phrases
+  for (const pattern of FILLERS) {
+    s = s.replace(pattern, "");
+  }
+  s = s.trim();
+
+  // 3. Trim to ~100 chars at the last word boundary
+  const limit = 100;
+  if (s.length > limit) {
+    s = s.slice(0, limit).replace(/\s+\S*$/, "").trimEnd() + "…";
   }
 
-  if (contradicting > supporting) {
-    return "Current reporting does not support this claim.";
+  // 4. Too short to be meaningful
+  if (s.length < 20) return "";
+
+  // Lowercase the first character so it reads as a continuation after " — "
+  return s.charAt(0).toLowerCase() + s.slice(1);
+}
+
+// ---------------------------------------------------------------------------
+// VerdictTrace — internal reasoning and audit trail
+// buildVerdictTrace: derives all fields from already-computed signals (no recomputation).
+// buildDisplayVerdict: derives UI-safe strings from a VerdictTrace.
+// Both are deterministic and contain no LLM calls.
+// ---------------------------------------------------------------------------
+
+function detectClaimType(claimText: string | undefined): ClaimType {
+  if (!claimText) return "factual";
+  const lower = claimText.toLowerCase();
+  if (/\b(today|right now|just now|just happened|breaking|currently|at this moment)\b/.test(lower)) {
+    return "real_time";
+  }
+  if (/\$\d+|\d+\s*%|\d[\d,]*\s*(million|billion|trillion)/i.test(lower)) {
+    return "statistical";
+  }
+  return "factual";
+}
+
+function deriveEvidenceStance(stance: Stance, claimType: ClaimType, reasonCode: ReasonCode): EvidenceStance {
+  if (claimType === "subjective") return "not_applicable";
+  if (stance === "supported") return "evidence_supports";
+  if (stance === "contradicted") return "evidence_contradicts";
+  if (reasonCode === "mixed_evidence") return "evidence_mixed";
+  return "evidence_absent";
+}
+
+function deriveVerdictKind(reasonCode: ReasonCode, claimType: ClaimType, overrideUsed: boolean): VerdictKind {
+  if (overrideUsed) return "override_match";
+  if (claimType === "subjective") return "subjective";
+  if (
+    claimType === "real_time" &&
+    reasonCode !== "authoritative_contradiction" &&
+    reasonCode !== "authoritative_support"
+  ) {
+    return "stale_data";
+  }
+  if (reasonCode === "authoritative_contradiction" || reasonCode === "authoritative_support") {
+    return "authoritative_match";
+  }
+  if (reasonCode === "coverage_contradiction" || reasonCode === "coverage_support") {
+    return "coverage_match";
+  }
+  if (reasonCode === "mixed_evidence") return "contested";
+  if (reasonCode === "provider_error") return "error";
+  return "unverifiable";
+}
+
+function deriveEvidenceDirectness(reasonCode: ReasonCode, sourceCount: number): EvidenceDirectness {
+  if (sourceCount === 0) return "none";
+  if (reasonCode === "authoritative_contradiction" || reasonCode === "authoritative_support") return "direct";
+  if (
+    reasonCode === "coverage_contradiction" ||
+    reasonCode === "coverage_support" ||
+    reasonCode === "mixed_evidence"
+  ) {
+    return "indirect";
+  }
+  return "none";
+}
+
+function deriveSourceDiversity(matches: any[], sourceCount: number): SourceDiversity {
+  if (sourceCount === 0) return "none";
+  if (sourceCount === 1) return "single_source";
+  const providers = new Set(matches.map((m) => safeString(m?.provider)).filter(Boolean));
+  if (providers.size >= 2) return "diverse";
+  const domains = new Set<string>();
+  for (const m of matches) {
+    const url = safeString(m?.url);
+    if (url) {
+      try { domains.add(new URL(url).hostname.replace(/^www\./, "")); } catch {}
+    }
+  }
+  if (domains.size >= 3) return "diverse";
+  return "single_type";
+}
+
+function deriveConsensusStrength(ev: { supporting: number; contradicting: number }): ConsensusStrength {
+  const total = ev.supporting + ev.contradicting;
+  if (total === 0) return "absent";
+  const majority = Math.max(ev.supporting, ev.contradicting);
+  if (majority === total) return "unanimous";
+  if (majority / total > 0.6) return "majority";
+  return "split";
+}
+
+function deriveFreshness(claimType: ClaimType, matches: any[]): Freshness {
+  if (claimType === "real_time") return "real_time_gap";
+  if (matches.length === 0) return "unknown";
+  const now = Date.now();
+  const dates = matches
+    .map((m) => safeString(m?.claimDate))
+    .filter(Boolean)
+    .map((d) => Date.parse(d))
+    .filter(Number.isFinite);
+  if (dates.length === 0) return "unknown";
+  const ageDays = (now - Math.max(...dates)) / 86_400_000;
+  return ageDays <= 180 ? "current" : "dated";
+}
+
+function buildVerdictReasons(
+  verdictKind: VerdictKind,
+  evidenceStance: EvidenceStance,
+  confidence: ConfidenceTier,
+  sourceCount: number,
+  overrideUsed: boolean,
+): string[] {
+  const reasons: string[] = [];
+
+  if (overrideUsed) {
+    reasons.push("Authoritative knowledge base override applied");
   }
 
-  return "Available sources support this claim.";
+  switch (verdictKind) {
+    case "override_match":
+    case "authoritative_match":
+      if (evidenceStance === "evidence_contradicts") {
+        reasons.push(
+          sourceCount > 1
+            ? `${sourceCount} independent fact-checkers address this claim`
+            : "Authoritative source contradicts this claim"
+        );
+      } else if (evidenceStance === "evidence_supports") {
+        reasons.push(
+          sourceCount > 1
+            ? `${sourceCount} independent fact-checkers support this claim`
+            : "Authoritative source supports this claim"
+        );
+      }
+      break;
+    case "coverage_match":
+      if (evidenceStance === "evidence_contradicts") {
+        reasons.push(`${sourceCount} coverage source${sourceCount !== 1 ? "s" : ""} contradict this claim`);
+      } else if (evidenceStance === "evidence_supports") {
+        reasons.push(`${sourceCount} coverage source${sourceCount !== 1 ? "s" : ""} reference this claim`);
+      } else {
+        reasons.push(`${sourceCount} source${sourceCount !== 1 ? "s" : ""} found — no clear verdict`);
+      }
+      break;
+    case "contested":
+      reasons.push(`Evidence conflicts — ${sourceCount} sources with divided verdicts`);
+      break;
+    case "subjective":
+      reasons.push("Opinion-based claim — no objective standard exists");
+      reasons.push("Not verifiable by fact-checking");
+      break;
+    case "unverifiable":
+      reasons.push("No credible sources found for this claim");
+      break;
+    case "stale_data":
+      reasons.push("Real-time claims cannot be reliably verified");
+      if (sourceCount > 0) {
+        reasons.push(
+          `${sourceCount} coverage source${sourceCount !== 1 ? "s" : ""} found — no authoritative verdict available`
+        );
+      }
+      break;
+    case "error":
+      reasons.push("Verification could not complete");
+      break;
+  }
+
+  if (
+    confidence === "low" &&
+    verdictKind !== "stale_data" &&
+    verdictKind !== "unverifiable" &&
+    verdictKind !== "subjective"
+  ) {
+    reasons.push("Low confidence — limited or indirect coverage");
+  }
+
+  return reasons.slice(0, 3);
+}
+
+export function buildVerdictTrace(params: {
+  stance: Stance;
+  status: string;
+  result: any;
+  assessment: RelevanceAssessment;
+  confidenceScore: number;
+  confidence: ConfidenceTier;
+  reasonCode: ReasonCode;
+  claimType: ClaimType;
+  overrideUsed: boolean;
+}): VerdictTrace {
+  const { stance, result, assessment, confidenceScore, confidence, reasonCode, claimType, overrideUsed } = params;
+  const matches: any[] = Array.isArray(result?.matches) ? result.matches : [];
+  const sourceCount = matches.length;
+
+  const evidenceStance = deriveEvidenceStance(stance, claimType, reasonCode);
+  const verdictKind = deriveVerdictKind(reasonCode, claimType, overrideUsed);
+  const evidenceDirectness = deriveEvidenceDirectness(reasonCode, sourceCount);
+  const sourceDiversity = deriveSourceDiversity(matches, sourceCount);
+  const ev = summarizeEvidence(matches);
+  const consensusStrength = deriveConsensusStrength(ev);
+  const freshness = deriveFreshness(claimType, matches);
+  const reasons = buildVerdictReasons(verdictKind, evidenceStance, confidence, sourceCount, overrideUsed);
+
+  return {
+    evidenceStance,
+    claimType,
+    verdictKind,
+    reasonCode,
+    evidenceDirectness,
+    sourceDiversity,
+    consensusStrength,
+    freshness,
+    sourceCount,
+    overrideUsed,
+    confidence,
+    _confidenceScore: confidenceScore,
+    reasons,
+  };
+}
+
+export function buildDisplayVerdict(trace: VerdictTrace): DisplayVerdict {
+  const { verdictKind, evidenceStance, sourceCount, confidence } = trace;
+
+  let label: string;
+  let sublabel: string;
+  let tone: VerdictTone;
+  let clashMechanic: DisplayVerdict["clashMechanic"];
+
+  switch (verdictKind) {
+    case "override_match":
+    case "authoritative_match":
+      if (evidenceStance === "evidence_contradicts") {
+        label = "Evidence contradicts this claim";
+        sublabel = sourceCount > 0
+          ? `${sourceCount} fact-checker${sourceCount !== 1 ? "s" : ""} have reviewed this claim`
+          : "Addressed by authoritative consensus";
+        tone = "contradicted";
+        clashMechanic = "factual_clash";
+      } else {
+        label = "Evidence supports this claim";
+        sublabel = sourceCount > 0
+          ? `${sourceCount} source${sourceCount !== 1 ? "s" : ""} confirm this claim`
+          : "Supported by authoritative consensus";
+        tone = "supported";
+        clashMechanic = "none";
+      }
+      break;
+    case "coverage_match":
+      if (evidenceStance === "evidence_contradicts") {
+        label = "Coverage disputes this";
+        sublabel = `${sourceCount} source${sourceCount !== 1 ? "s" : ""} found — no authoritative verdict`;
+        tone = "contradicted";
+        clashMechanic = confidence === "high" || confidence === "medium" ? "factual_clash" : "none";
+      } else {
+        label = "Coverage references this";
+        sublabel = `${sourceCount} source${sourceCount !== 1 ? "s" : ""} found — not a definitive verdict`;
+        tone = "supported";
+        clashMechanic = "none";
+      }
+      break;
+    case "contested":
+      label = "Experts genuinely disagree on this";
+      sublabel = "Evidence found on both sides — this is actively contested";
+      tone = "contested";
+      clashMechanic = "none";
+      break;
+    case "subjective":
+      label = "This is a matter of opinion";
+      sublabel = "Both sides can make a case";
+      tone = "subjective";
+      clashMechanic = "subjective_clash";
+      break;
+    case "unverifiable":
+      label = "No evidence found";
+      sublabel = "This claim isn't addressed by available sources";
+      tone = "unverifiable";
+      clashMechanic = "none";
+      break;
+    case "stale_data":
+      label = "Can't verify in real time";
+      sublabel = sourceCount > 0
+        ? "Recent coverage found — no authoritative verdict available yet"
+        : "No sources found for this real-time claim";
+      tone = "stale";
+      clashMechanic = "none";
+      break;
+    case "error":
+    default:
+      label = "Verification unavailable";
+      sublabel = "Check back later";
+      tone = "unverifiable";
+      clashMechanic = "none";
+      break;
+  }
+
+  return { label, sublabel, tone, clashMechanic };
 }
 
 export function buildOverrideVerification(
@@ -763,24 +1344,48 @@ export function buildOverrideVerification(
   const { confidenceScore, confidenceTier } = computeConfidence(
     overrideStance, "matched", overrideMatchShape, { relevant: true, reason: "Known fact override." }
   );
+  const overrideReasonCode = override.contradictsClaim
+    ? ("authoritative_contradiction" as const)
+    : ("authoritative_support" as const);
   const explanation = override.contradictsClaim
     ? "Known fact override: this claim is contradicted."
     : "Known fact override: this claim is supported.";
   const summary = override.contradictsClaim
     ? "Sources confirm this claim is contradicted by a known fact."
     : "Sources confirm this claim is supported by a known fact.";
+  const resultMeta = getResultMeta({
+    status: "matched",
+    stance: overrideStance,
+    reasonCode: overrideReasonCode,
+    confidenceTier,
+    representativeCount: 1,
+    mode: "fact_check",
+  });
+
+  const overrideTrace = buildVerdictTrace({
+    stance: overrideStance,
+    status: "matched",
+    result: overrideMatchShape,
+    assessment: { relevant: true, reason: "Known fact override." },
+    confidenceScore,
+    confidence: confidenceTier,
+    reasonCode: overrideReasonCode,
+    claimType: "factual",
+    overrideUsed: true,
+  });
 
   return {
     status: "matched" as const,
     mode: "fact_check" as const,
     stance: overrideStance,
-    reasonCode: override.contradictsClaim
-      ? ("authoritative_contradiction" as const)
-      : ("authoritative_support" as const),
+    reasonCode: overrideReasonCode,
     confidenceScore,
     confidenceTier,
     explanation,
     summary,
+    ...resultMeta,
+    verdictTrace: overrideTrace,
+    displayVerdict: buildDisplayVerdict(overrideTrace),
     relevance: {
       relevant: true,
       reason: "Known fact override matched this claim family.",
@@ -832,19 +1437,27 @@ export function buildVerificationFromResult(
   const _ev = summarizeEvidence(_rawMatches);
   const explanation = buildExplanation(_ev.supporting, _ev.contradicting);
   const summary = buildSummary(_rawMatches);
+  const { representativeCount } = clusterEvidence(_rawMatches);
+  const _claimType = detectClaimType(claimText);
 
   if (result?.status === "matched" && !assessment.relevant) {
     const { confidenceScore, confidenceTier } = computeConfidence("unclear", "matched", result, assessment);
+    const reasonCode = deriveReasonCode("unclear", "matched", result, assessment);
+    const resultMeta = getResultMeta({ status: "matched", stance: "unclear", reasonCode, confidenceTier, representativeCount, mode });
+    const _trace = buildVerdictTrace({ stance: "unclear", status: "matched", result, assessment, confidenceScore, confidence: confidenceTier, reasonCode, claimType: _claimType, overrideUsed: false });
     return {
       ...result,
       ...topOverride,
       stance: "unclear",
-      reasonCode: deriveReasonCode("unclear", "matched", result, assessment),
+      reasonCode,
       confidenceScore,
       confidenceTier,
       explanation,
       summary,
       relevance: assessment,
+      ...resultMeta,
+      verdictTrace: _trace,
+      displayVerdict: buildDisplayVerdict(_trace),
       message: mergeVerificationMessage(
         result,
         "A source was found, but it doesn't closely match this claim."
@@ -855,16 +1468,22 @@ export function buildVerificationFromResult(
   if (result?.status === "matched" && assessment.relevant) {
     if (stance === "contradicted") {
       const { confidenceScore, confidenceTier } = computeConfidence(stance, "matched", result, assessment);
+      const reasonCode = deriveReasonCode(stance, "matched", result, assessment);
+      const resultMeta = getResultMeta({ status: "matched", stance, reasonCode, confidenceTier, representativeCount, mode });
+      const _trace = buildVerdictTrace({ stance, status: "matched", result, assessment, confidenceScore, confidence: confidenceTier, reasonCode, claimType: _claimType, overrideUsed: false });
       return {
         ...result,
         ...topOverride,
         stance,
-        reasonCode: deriveReasonCode(stance, "matched", result, assessment),
+        reasonCode,
         confidenceScore,
         confidenceTier,
         explanation,
         summary,
         relevance: assessment,
+        ...resultMeta,
+        verdictTrace: _trace,
+        displayVerdict: buildDisplayVerdict(_trace),
         message: mergeVerificationMessage(
           result,
           mode === "fact_check"
@@ -876,16 +1495,22 @@ export function buildVerificationFromResult(
 
     if (stance === "supported") {
       const { confidenceScore, confidenceTier } = computeConfidence(stance, "matched", result, assessment);
+      const reasonCode = deriveReasonCode(stance, "matched", result, assessment);
+      const resultMeta = getResultMeta({ status: "matched", stance, reasonCode, confidenceTier, representativeCount, mode });
+      const _trace = buildVerdictTrace({ stance, status: "matched", result, assessment, confidenceScore, confidence: confidenceTier, reasonCode, claimType: _claimType, overrideUsed: false });
       return {
         ...result,
         ...topOverride,
         stance,
-        reasonCode: deriveReasonCode(stance, "matched", result, assessment),
+        reasonCode,
         confidenceScore,
         confidenceTier,
         explanation,
         summary,
         relevance: assessment,
+        ...resultMeta,
+        verdictTrace: _trace,
+        displayVerdict: buildDisplayVerdict(_trace),
         message: mergeVerificationMessage(
           result,
           mode === "fact_check"
@@ -896,16 +1521,22 @@ export function buildVerificationFromResult(
     }
 
     const { confidenceScore, confidenceTier } = computeConfidence(stance, "matched", result, assessment);
+    const reasonCode = deriveReasonCode(stance, "matched", result, assessment);
+    const resultMeta = getResultMeta({ status: "matched", stance, reasonCode, confidenceTier, representativeCount, mode });
+    const _trace = buildVerdictTrace({ stance, status: "matched", result, assessment, confidenceScore, confidence: confidenceTier, reasonCode, claimType: _claimType, overrideUsed: false });
     return {
       ...result,
       ...topOverride,
       stance,
-      reasonCode: deriveReasonCode(stance, "matched", result, assessment),
-      confidenceScore,
+      reasonCode,
       confidenceTier,
+      confidenceScore,
       explanation,
       summary,
       relevance: assessment,
+      ...resultMeta,
+      verdictTrace: _trace,
+      displayVerdict: buildDisplayVerdict(_trace),
       message: mergeVerificationMessage(
         result,
         mode === "fact_check"
@@ -916,6 +1547,9 @@ export function buildVerificationFromResult(
   }
 
   if (result?.status === "no_match") {
+    const _noMatchAssessment = { relevant: false, reason: "No direct matching source was returned." };
+    const _noMatchTrace = buildVerdictTrace({ stance: "unclear", status: "no_match", result, assessment: _noMatchAssessment, confidenceScore: 0, confidence: "none", reasonCode: "no_reliable_match", claimType: _claimType, overrideUsed: false });
+    const resultMeta = getResultMeta({ status: "no_match", stance: "unclear", reasonCode: "no_reliable_match", confidenceTier: "none", representativeCount: 0, mode });
     return {
       ...result,
       stance: "unclear",
@@ -924,16 +1558,19 @@ export function buildVerificationFromResult(
       confidenceTier: "none" as const,
       explanation: "No matching source found.",
       summary: "No reliable evidence found.",
-      relevance: {
-        relevant: false,
-        reason: "No direct matching source was returned.",
-      },
+      relevance: _noMatchAssessment,
+      ...resultMeta,
+      verdictTrace: _noMatchTrace,
+      displayVerdict: buildDisplayVerdict(_noMatchTrace),
       message:
         safeString(result?.message) ||
         "No relevant fact check or recent coverage found.",
     };
   }
 
+  const _errAssessment = { relevant: false, reason: "Verification provider failed before a usable result was returned." };
+  const _errTrace = buildVerdictTrace({ stance: "unclear", status: "error", result, assessment: _errAssessment, confidenceScore: 0, confidence: "none", reasonCode: "provider_error", claimType: _claimType, overrideUsed: false });
+  const resultMeta = getResultMeta({ status: "error", stance: "unclear", reasonCode: "provider_error", confidenceTier: "none", representativeCount: 0, mode });
   return {
     ...result,
     status: "error",
@@ -943,10 +1580,10 @@ export function buildVerificationFromResult(
     confidenceTier: "none" as const,
     explanation: "Verification could not complete.",
     summary: "Verification could not complete.",
-    relevance: {
-      relevant: false,
-      reason: "Verification provider failed before a usable result was returned.",
-    },
+    relevance: _errAssessment,
+    ...resultMeta,
+    verdictTrace: _errTrace,
+    displayVerdict: buildDisplayVerdict(_errTrace),
     message: safeString(result?.message) || "Verification provider failed.",
   };
 }
@@ -1062,7 +1699,26 @@ export function buildEvidenceFromMatches(
     : matchQualityScore;
   const sorted = [...list].sort((a, b) => scoreFn(b) - scoreFn(a));
 
-  return sorted.map((m: any, index: number) => {
+  // Alignment filtering: when claimText is present, score each match against
+  // the claim anchors. Drop "reject" tier matches only when at least one
+  // non-reject match exists (fail-closed: never return an empty list).
+  let candidates = sorted;
+  if (claimText) {
+    const anchors = extractClaimAnchors(claimText);
+    const withAlignment = sorted.map((m) => ({
+      m,
+      alignment: scoreAlignment(anchors, m),
+    }));
+    const nonReject = withAlignment.filter((x) => x.alignment.tier !== "reject");
+    if (nonReject.length > 0) {
+      candidates = nonReject.map((x) => ({ ...x.m, _matchWhy: x.alignment.matchWhy }));
+    } else {
+      // All reject — keep everything but still stamp matchWhy on each item.
+      candidates = withAlignment.map((x) => ({ ...x.m, _matchWhy: x.alignment.matchWhy }));
+    }
+  }
+
+  return candidates.map((m: any, index: number) => {
     const provider = safeString(m?.provider) || "unknown";
     const url = safeString(m?.url) || undefined;
     const publisher = safeString(m?.publisher) || (url ? domainFromUrl(url) : undefined) || undefined;
@@ -1084,6 +1740,7 @@ export function buildEvidenceFromMatches(
       supports: stance === "supported",
       contradicts: stance === "contradicted",
       stance,
+      matchWhy: safeString(m?._matchWhy) || undefined,
     };
   });
 }

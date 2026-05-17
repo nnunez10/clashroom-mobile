@@ -11,6 +11,20 @@ import {
   type ReasonCode,
   type Stance,
 } from "@/lib/claim/types";
+import { enterPiP } from "@/lib/clashbot/pip";
+import {
+  applyLoss,
+  applyRecovery,
+  shouldIncrementStreak,
+  shouldApplyRecovery,
+} from "@/lib/clashbot/behaviorEngine";
+import {
+  getVerdictHit,
+  getReactionLine,
+  getVerdictLabel,
+} from "@/lib/clashbot/verdictEngine";
+import { LinearGradient } from "expo-linear-gradient";
+import ClashVerdictOverlay, { type VerdictWord } from "./ClashVerdictOverlay";
 import { clusterEvidence } from "@/lib/clashbot/evidenceClustering";
 import { suggestTypoCorrection } from "@/lib/clashbot/normalizeInput";
 import { getResultExplanation } from "@/lib/clashbot/resultExplanation";
@@ -76,6 +90,16 @@ type VerificationResult = {
     relevant: boolean;
     reason: string;
   };
+  resultType?: "breaking_coverage" | "fact_check" | "mixed";
+  confidenceLabel?: string;
+  shortWhyItWon?: string;
+  displayVerdict?: {
+    label: string;
+    sublabel: string;
+    tone: string;
+    clashMechanic: string;
+  };
+  verdictTrace?: any;
 };
 
 type ClaimTimeline = {
@@ -111,6 +135,19 @@ type ClaimItem = {
   evidence?: EvidenceRecord[];
   events?: ClaimEvent[];
   suggestedText?: string;
+  isClash?: boolean;
+  clashPartnerId?: string | null;
+  isSubjective?: boolean;
+  pendingResponse?: boolean;
+  responseDeadline?: number;
+  authorId?: string;
+  authorName?: string;
+  challengedBy?: {
+    userId: string;
+    userName: string;
+    at: number;
+    message?: string;
+  } | null;
   claimDna?: {
     normalized?: string;
     fingerprint?: string;
@@ -131,6 +168,11 @@ type ClashBotSheetProps = {
   mode?: "dashboard" | "quick_verify";
   initialDraft?: string;
   quickVerifyTarget?: string;
+  pendingResponse?: boolean;
+  onPendingResolved?: () => void;
+  onStartPending?: () => void;
+  onDefendClaim?: (text: string) => void;
+  onChallengeClaim?: (claimId: string) => void;
 };
 
 function getStatusBadge(
@@ -177,42 +219,65 @@ function getSourceTypeLabel(verification?: VerificationResult | any) {
   return "Source";
 }
 
-function getVerdictLabel(claim: ClaimItem) {
-  const verification = claim.verification;
-  const ratingText =
-    verification?.top?.rating?.text ||
-    verification?.top?.rating?.raw ||
-    verification?.matches?.[0]?.rating?.text ||
-    verification?.matches?.[0]?.rating?.raw ||
-    "";
 
-  const normalized = String(ratingText).toLowerCase();
-  const stance = verification?.stance;
+function getResultTypeLabel(
+  verification?: VerificationResult | any
+): string | null {
+  if (!verification?.resultType) return null;
+  if (verification.resultType === "fact_check") return "Verified";
+  if (verification.resultType === "breaking_coverage") return "Breaking";
+  if (verification.resultType === "mixed") return "Developing";
+  return null;
+}
 
-  if (claim.status === "checking") return "Checking";
-  if (claim.status === "queued") return "Queued";
-  if (claim.status === "error") return "Error";
-  if (claim.status === "no_match") return "Unverified";
+function getVerdictHitTone(hit: string) {
+  if (hit === "RIGHT") return styles.verdictHitPositive;
+  if (hit === "WRONG") return styles.verdictHitNegative;
+  if (hit === "TOO EARLY") return styles.verdictHitWarning;
+  if (hit === "UNCLEAR") return styles.verdictHitUnclear;
+  return styles.verdictHitNeutral;
+}
 
-  if (stance === "contradicted") return "Contradicted";
-  if (stance === "supported") return "Supported";
+function getVerdictBackground(hit: string) {
+  if (hit === "RIGHT") return { backgroundColor: "#166534" };
+  if (hit === "WRONG") return { backgroundColor: "#7f1d1d" };
+  if (hit === "TOO EARLY") return { backgroundColor: "#92400e" };
+  if (hit === "UNCLEAR") return { backgroundColor: "#4c1d95" };
+  return { backgroundColor: "#0f172a" };
+}
 
-  if (claim.status === "disputed") return "Weak Match";
+function getVerdictBackgroundByTone(tone: string): { backgroundColor: string } {
+  switch (tone) {
+    case "contradicted": return { backgroundColor: "#7f1d1d" };
+    case "supported":    return { backgroundColor: "#166534" };
+    case "contested":    return { backgroundColor: "#92400e" };
+    case "subjective":   return { backgroundColor: "#1e3a5f" };
+    case "stale":        return { backgroundColor: "#1a2744" };
+    default:             return { backgroundColor: "#0f172a" };
+  }
+}
 
-  if (normalized.includes("mostly false")) return "Mostly False";
-  if (normalized.includes("false")) return "False";
-  if (normalized.includes("misleading")) return "Misleading";
-  if (normalized.includes("half true")) return "Mixed";
-  if (normalized.includes("mixed")) return "Mixed";
-  if (normalized.includes("mostly true")) return "Mostly True";
-  if (normalized.includes("true")) return "True";
-  if (normalized.includes("contradicted")) return "Contradicted";
-  if (normalized.includes("supported")) return "Supported";
+function getVerdictWordByTone(tone: string, isOpinion: boolean): string {
+  if (isOpinion) return "TAKE";
+  switch (tone) {
+    case "contradicted": return "DISPUTED";
+    case "supported":    return "CONFIRMED";
+    case "contested":    return "CONTESTED";
+    case "stale":        return "UNVERIFIED";
+    case "unverifiable": return "NO MATCH";
+    default:             return "UNCLEAR";
+  }
+}
 
-  if (claim.status === "matched" && stance === "unclear") return "Unconfirmed";
-  if (claim.status === "matched") return "Matched";
-
-  return "Unknown";
+function getVerdictTextStyleByTone(tone: string, isOpinion: boolean) {
+  if (isOpinion) return styles.verdictHitNeutral;
+  switch (tone) {
+    case "contradicted": return styles.verdictHitNegative;
+    case "supported":    return styles.verdictHitPositive;
+    case "contested":    return styles.verdictHitWarning;
+    case "unverifiable": return styles.verdictHitUnclear;
+    default:             return styles.verdictHitNeutral;
+  }
 }
 
 function getEvidenceSummary(verification?: VerificationResult | any) {
@@ -627,33 +692,79 @@ function QuickVerifyStatus({
   );
 
   const helperText =
+    latest.verification?.shortWhyItWon ??
     getResultExplanation({
       status: latest.status,
       stance: latest.verification?.stance,
       reasonCode: statusBadge.reasonCode,
       confidenceTier: latest.verification?.confidenceTier,
       representativeCount: qvRepCount,
-    }) ?? getReasonCodeHelperText(statusBadge.reasonCode);
+    }) ??
+    getReasonCodeHelperText(statusBadge.reasonCode);
 
   const sourceType = getSourceTypeLabel(verification);
   const evidenceSummary = getEvidenceSummary(verification);
-  const evidenceDate = formatEvidenceDate(topMatch?.claimDate, verification?.mode);
+  const evidenceDate = formatEvidenceDate(
+    topMatch?.claimDate,
+    verification?.mode
+  );
   const evidenceReps = getEvidenceRepresentatives(verification);
   const isActive = latest.status === "checking" || latest.status === "queued";
 
+  const verdictHit = getVerdictHit(latest);
+  const reactionLine = getReactionLine(latest);
+  const resultTypeLabel = getResultTypeLabel(verification);
+
+  const isOpinionLatest = (latest as any).isSubjective === true;
+  const qvDisplayVerdict = verification?.displayVerdict;
+  const qvTone = qvDisplayVerdict?.tone;
+  const displayVerdictHit = qvTone
+    ? getVerdictWordByTone(qvTone, isOpinionLatest)
+    : (isOpinionLatest ? "Hot Take" : verdictHit);
+  const displayReaction = qvDisplayVerdict?.label
+    ?? (isOpinionLatest ? "This is a clash of takes, not a verified fact." : reactionLine);
+  const displaySublabel = qvDisplayVerdict?.sublabel ?? null;
+  const qvVerdictBg = qvTone
+    ? getVerdictBackgroundByTone(qvTone)
+    : (isOpinionLatest ? { backgroundColor: "#1e3a5f" } : getVerdictBackground(verdictHit));
+  const qvHeroTextStyle = qvTone
+    ? getVerdictTextStyleByTone(qvTone, isOpinionLatest)
+    : undefined;
+
   return (
     <View style={styles.quickStatusCard}>
-      <View style={[styles.statusBadge, statusBadge.style]}>
-        <Text style={styles.statusBadgeText}>{statusBadge.label}</Text>
+      <View style={[styles.verdictHero, qvVerdictBg]}>
+        <LinearGradient
+          colors={["rgba(255,255,255,0.08)", "rgba(255,255,255,0.00)"]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={StyleSheet.absoluteFillObject}
+          pointerEvents="none"
+        />
+
+        <Text style={[styles.verdictHeroText, qvHeroTextStyle]}>{displayVerdictHit}</Text>
+        <Text style={styles.reactionHeroText}>{displayReaction}</Text>
+        {!!displaySublabel && (
+          <Text style={styles.heroSublabelText}>{displaySublabel}</Text>
+        )}
+        <Text style={styles.claimHeroText}>{latest.text}</Text>
+
+        <View style={styles.metaRowNew}>
+          {!!verification?.confidenceLabel && (
+            <View style={styles.metaPill}>
+              <Text style={styles.metaPillText}>
+                {verification.confidenceLabel}
+              </Text>
+            </View>
+          )}
+
+          {!!resultTypeLabel && (
+            <View style={styles.metaPill}>
+              <Text style={styles.metaPillText}>{resultTypeLabel}</Text>
+            </View>
+          )}
+        </View>
       </View>
-
-      {!!helperText && (
-        <Text style={styles.quickStatusExplanation}>{helperText}</Text>
-      )}
-
-      <Text style={styles.quickStatusClaimText} numberOfLines={2}>
-        {latest.text}
-      </Text>
 
       {isActive && (
         <Text style={styles.quickStatusHint}>
@@ -663,25 +774,9 @@ function QuickVerifyStatus({
 
       {!!verification && (
         <View style={styles.quickEvidenceWrap}>
-          <View style={styles.metaRow}>
-            <View style={styles.sourceTypeBadge}>
-              <Text style={styles.sourceTypeBadgeText}>{sourceType}</Text>
-            </View>
-
-            {(!!topMatch?.publisher || !!evidenceDate) && (
-              <Text style={styles.publisherText} numberOfLines={1}>
-                {[topMatch?.publisher, evidenceDate].filter(Boolean).join(" · ")}
-              </Text>
-            )}
-          </View>
-
-          {!compact && !!verification?.message && (
-            <Text style={styles.messageText}>{verification.message}</Text>
-          )}
-
-          {!compact && !!verification?.relevance?.reason && (
-            <Text style={styles.relevanceText}>
-              Relevance: {verification.relevance.reason}
+          {(!!topMatch?.publisher || !!evidenceDate) && (
+            <Text style={styles.publisherText} numberOfLines={1}>
+              {[topMatch?.publisher, evidenceDate].filter(Boolean).join(" · ")}
             </Text>
           )}
 
@@ -693,8 +788,11 @@ function QuickVerifyStatus({
             <View style={styles.evidencePreview}>
               {evidenceReps.map((rep, idx) => {
                 const repDate =
-                  formatEvidenceDate(rep.claimDate, verification?.mode) ?? undefined;
-                const repMeta = [rep.publisher, repDate].filter(Boolean).join(" · ");
+                  formatEvidenceDate(rep.claimDate, verification?.mode) ??
+                  undefined;
+                const repMeta = [rep.publisher, repDate]
+                  .filter(Boolean)
+                  .join(" · ");
                 const repRating = rep.rating?.text ?? rep.rating?.raw ?? null;
 
                 return (
@@ -745,6 +843,65 @@ function QuickVerifyStatus({
   );
 }
 
+function getArgumentSnippet(claimText: string, seed: number): string {
+  const lower = claimText.toLowerCase();
+
+  if (lower.includes("iphone") || lower.includes("ios")) {
+    const options = [
+      "Android gives you way more customization",
+      "Android phones are cheaper for similar performance",
+      "you get more device variety with Android",
+    ];
+    return options[seed % options.length];
+  }
+
+  if (lower.includes("android")) {
+    const options = [
+      "iPhones are more optimized and smoother",
+      "iOS apps are usually better designed",
+      "Apple has better ecosystem integration",
+    ];
+    return options[seed % options.length];
+  }
+
+  if (lower.includes("cold") || lower.includes("warm")) {
+    const options = [
+      "warmer climates are easier to live in year-round",
+      "cold weather limits outdoor lifestyle",
+      "weather affects quality of life more than you think",
+    ];
+    return options[seed % options.length];
+  }
+
+  return "there's a stronger argument on the other side";
+}
+
+function getClashSideScore(claim: ClaimItem): number {
+  const confidence =
+    typeof claim.verification?.confidenceScore === "number"
+      ? claim.verification.confidenceScore
+      : 50;
+
+  let score = confidence;
+
+  if (claim.status === "matched") score += 8;
+  if (claim.status === "disputed") score -= 4;
+  if (claim.status === "no_match") score -= 10;
+  if (claim.status === "error") score -= 15;
+
+  return score;
+}
+
+function getClashEdgeLabel(left: ClaimItem, right: ClaimItem): string {
+  const leftScore = getClashSideScore(left);
+  const rightScore = getClashSideScore(right);
+  const diff = leftScore - rightScore;
+
+  if (Math.abs(diff) <= 6) return "Too Close to Call";
+  if (diff > 0) return "Side A Leading";
+  return "Side B Leading";
+}
+
 export default function ClashBotSheet({
   isOpen,
   onClose,
@@ -755,6 +912,11 @@ export default function ClashBotSheet({
   mode = "dashboard",
   initialDraft = "",
   quickVerifyTarget,
+  pendingResponse = false,
+  onPendingResolved,
+  onStartPending,
+  onDefendClaim,
+  onChallengeClaim,
 }: ClashBotSheetProps) {
   const [draft, setDraft] = useState(initialDraft);
   const [closeEnabled, setCloseEnabled] = useState(false);
@@ -762,13 +924,32 @@ export default function ClashBotSheet({
     {}
   );
   const [dashboardVerifyTarget, setDashboardVerifyTarget] = useState("");
+  const [toastVisible, setToastVisible] = useState(false);
+  const [escalationLevel, setEscalationLevel] = useState(0);
+  const [clashCred, setClashCred] = useState(100);
+  const [lastCredDelta, setLastCredDelta] = useState<number | null>(null);
+  const [streak, setStreak] = useState(0);
+  const [recoveryMode, setRecoveryMode] = useState(false);
+  const [momentumFeedback, setMomentumFeedback] = useState("");
+  const [momentumFeedbackRequest, setMomentumFeedbackRequest] = useState<{
+    streakIncrements: boolean;
+    recoveryApplies: boolean;
+    challengeResolved?: boolean;
+  } | null>(null);
+  const [now, setNow] = useState(Date.now());
   const inputRef = useRef<TextInput | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const momentumTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toastShownRef = useRef(false);
+  const streakHandledRef = useRef(false);
+  const seenChallengeLossEventIdsRef = useRef<Set<string>>(new Set());
 
-  console.log("[ClashBot] render", {
-    isOpen,
-    mode,
-    draftLength: draft.length,
-  });
+  // Verdict overlay state
+  const [overlayVisible, setOverlayVisible] = useState(false);
+  const [overlayVerdict, setOverlayVerdict] = useState<VerdictWord>("CHECK");
+  const [overlayReaction, setOverlayReaction] = useState("");
+  const [overlayClaimText, setOverlayClaimText] = useState("");
+  const shownOverlayClaimIdRef = useRef<string | null>(null);
 
   const prevIsOpenRef = useRef(false);
 
@@ -792,9 +973,112 @@ export default function ClashBotSheet({
     return () => clearTimeout(t);
   }, [isOpen]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+
+    setNow(Date.now());
+    const timer = setInterval(() => {
+      setNow(Date.now());
+    }, 500);
+
+    return () => clearInterval(timer);
+  }, [isOpen]);
+
   const sortedClaims = useMemo(() => {
     return [...claims].reverse();
   }, [claims]);
+
+  const verifyingClaim = useMemo(
+    () => claims.find((c) => c.status === "checking"),
+    [claims]
+  );
+
+  const nextQueuedClaims = useMemo(
+    () =>
+      claims
+        .filter((c) => c.status === "queued")
+        .slice(0, 2),
+    [claims]
+  );
+
+  const activeClashPair = useMemo(() => {
+    const clashClaims = claims.filter(
+      (c) => c.isClash && c.clashPartnerId && c.status !== "error"
+    );
+
+    for (const claim of clashClaims) {
+      const partner = claims.find((c) => c.id === claim.clashPartnerId);
+      if (!partner) continue;
+      if (!partner.isClash) continue;
+
+      return {
+        left: claim,
+        right: partner,
+      };
+    }
+
+    return null;
+  }, [claims]);
+
+  const clashEdgeLabel = useMemo(() => {
+    if (!activeClashPair) return null;
+    return getClashEdgeLabel(activeClashPair.left, activeClashPair.right);
+  }, [activeClashPair]);
+
+  const isOpinionClash = !!(
+    activeClashPair?.left.isSubjective || activeClashPair?.right.isSubjective
+  );
+
+  const clashLost = pendingResponse && escalationLevel >= 2;
+  const clashActive = pendingResponse || clashLost || recoveryMode;
+  const isBlockingClash = pendingResponse && !clashLost;
+
+  useEffect(() => {
+    if (clashLost) {
+      onPendingResolved?.();
+
+      setClashCred((prev) => {
+        const next = applyLoss(prev);
+        setLastCredDelta(next - prev);
+        return next;
+      });
+      setStreak(0);
+      setRecoveryMode(true);
+    }
+  }, [clashLost]);
+
+  const CHALLENGER_TONES = {
+    casual: [
+      "Nah —",
+      "I don't think so —",
+      "I'd push back —",
+      "Not really —",
+    ],
+    analytical: [
+      "If you break it down —",
+      "Looking at it objectively —",
+      "The stronger case is —",
+      "Evidence points the other way —",
+    ],
+    spicy: [
+      "That's not even close —",
+      "Come on —",
+      "No way —",
+      "Hard pass on that take —",
+    ],
+  } as const;
+
+  const challengerMessage = useMemo(() => {
+    if (!isOpinionClash || !activeClashPair) return null;
+    const seed = activeClashPair.left.id.charCodeAt(
+      activeClashPair.left.id.length - 1
+    );
+    const groups = [CHALLENGER_TONES.casual, CHALLENGER_TONES.analytical, CHALLENGER_TONES.spicy];
+    const group = groups[seed % 3];
+    const tone = group[Math.floor(seed / 3) % group.length];
+    const snippet = getArgumentSnippet(activeClashPair.left.text, seed);
+    return `${tone} ${snippet}.`;
+  }, [isOpinionClash, activeClashPair]);
 
   const familyViews = useMemo(() => {
     return buildClaimFamilyViews(sortedClaims);
@@ -842,12 +1126,205 @@ export default function ClashBotSheet({
     });
   }, [familyViews]);
 
+  // Show full-screen verdict overlay when Quick Verify resolves
+  useEffect(() => {
+    if (mode !== "quick_verify" || !isOpen) return;
+
+    // Mirror the "latest" claim logic from QuickVerifyStatus
+    let latest: ClaimItem | null = null;
+    if (quickVerifyTarget) {
+      const t = quickVerifyTarget.trim().toLowerCase();
+      latest =
+        claims.find((c) => c.text?.trim().toLowerCase() === t) ?? null;
+    } else {
+      latest = claims[0] ?? null;
+    }
+
+    if (!latest) return;
+
+    const isResolved =
+      latest.status === "matched" ||
+      latest.status === "disputed" ||
+      latest.status === "no_match" ||
+      latest.status === "error";
+
+    if (!isResolved) return;
+
+    // 🔥 NEW: Only allow strong moments to trigger overlay
+    const v = latest.verification;
+
+    const isHighImpact =
+      v?.stance === "supported" ||
+      v?.stance === "contradicted" ||
+      (typeof v?.confidenceScore === "number" && v.confidenceScore >= 75) ||
+      v?.resultType === "breaking_coverage";
+
+    if (!isHighImpact) return;
+
+    // Only fire once per resolved claim
+    if (shownOverlayClaimIdRef.current === latest.id) return;
+    shownOverlayClaimIdRef.current = latest.id;
+
+    setOverlayVerdict(getVerdictHit(latest) as VerdictWord);
+    setOverlayReaction(getReactionLine(latest));
+    setOverlayClaimText(latest.text);
+
+    // 🔥 Delay overlay for dramatic timing
+    setTimeout(() => {
+      setOverlayVisible(true);
+    }, 300);
+  }, [claims, mode, isOpen, quickVerifyTarget]);
+
+  // Reset shown-ref when the sheet closes so a re-open can show the overlay again
+  useEffect(() => {
+    if (!isOpen) {
+      shownOverlayClaimIdRef.current = null;
+      setOverlayVisible(false);
+    }
+  }, [isOpen]);
+
+  // Reset streak guard when pendingResponse clears
+  useEffect(() => {
+    if (!pendingResponse) {
+      streakHandledRef.current = false;
+    }
+  }, [pendingResponse]);
+
+  // Reset toast guard when pendingResponse clears; escalate to level 1 on entry
+  useEffect(() => {
+    if (!pendingResponse) {
+      toastShownRef.current = false;
+      setToastVisible(false);
+      setEscalationLevel(0);
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = null;
+      }
+    } else {
+      setEscalationLevel((prev) => (prev === 0 ? 1 : prev));
+    }
+  }, [pendingResponse]);
+
+  // Escalate to level 2 when user tries to type a new claim while pending
+  useEffect(() => {
+    if (pendingResponse && draft.trim().length > 0) {
+      setEscalationLevel(2);
+    }
+  }, [draft, pendingResponse]);
+
+  // Clean up toast timer on unmount
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      if (momentumTimerRef.current) clearTimeout(momentumTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!momentumFeedbackRequest) return;
+
+    const feedback = [
+      momentumFeedbackRequest.challengeResolved
+        ? "⚔️ Challenge Defended"
+        : "STREAK SAVED",
+    ];
+    if (momentumFeedbackRequest.streakIncrements) {
+      feedback.push(
+        momentumFeedbackRequest.challengeResolved
+          ? "🔥 Streak Protected"
+          : `🔥 ${streak} Win Streak`
+      );
+    }
+    if (momentumFeedbackRequest.recoveryApplies) {
+      feedback.push("+2 ClashCred Recovery");
+    }
+
+    showMomentumFeedback(feedback.join(" · "));
+    setMomentumFeedbackRequest(null);
+  }, [momentumFeedbackRequest, streak]);
+
+  useEffect(() => {
+    for (const claim of claims) {
+      const events = Array.isArray(claim.events) ? claim.events : [];
+
+      for (const event of events) {
+        if (event.type !== "auto_loss_no_response" || !event.id) continue;
+        if (!claim.challengedBy) continue;
+        if (seenChallengeLossEventIdsRef.current.has(event.id)) continue;
+
+        seenChallengeLossEventIdsRef.current.add(event.id);
+        showMomentumFeedback(`❌ Lost Challenge to @${claim.challengedBy.userName}`);
+      }
+    }
+  }, [claims]);
+
+  function showMomentumFeedback(message: string) {
+    if (momentumTimerRef.current) clearTimeout(momentumTimerRef.current);
+    setMomentumFeedback(message);
+    momentumTimerRef.current = setTimeout(() => {
+      setMomentumFeedback("");
+      momentumTimerRef.current = null;
+    }, 2500);
+  }
+
+  function showPressureToast() {
+    if (toastShownRef.current) return;
+    toastShownRef.current = true;
+    setToastVisible(true);
+    toastTimerRef.current = setTimeout(() => {
+      setToastVisible(false);
+      toastTimerRef.current = null;
+    }, 2500);
+  }
+
   const titleText =
     mode === "quick_verify" ? "Quick Verify" : "ClashBot Dashboard";
 
   function handleSubmit() {
     const text = draft.trim();
     if (!text) return;
+
+    if (isOpinionClash) {
+      onStartPending?.();
+    }
+
+    const streakIncrements = shouldIncrementStreak({
+      pendingResponse,
+      clashLost,
+      alreadyHandled: streakHandledRef.current,
+    });
+    const recoveryApplies = shouldApplyRecovery({
+      recoveryMode,
+      pendingResponse,
+      clashLost,
+    });
+    const normalizedDefenseText = text.toLowerCase();
+    const defendedClaim = claims.find(
+      (claim) =>
+        claim.pendingResponse &&
+        claim.text.trim().toLowerCase() === normalizedDefenseText
+    );
+    const challengeResolved = !!defendedClaim?.challengedBy;
+
+    if (streakIncrements) {
+      setStreak((prev) => prev + 1);
+      streakHandledRef.current = true;
+    }
+
+    if (recoveryApplies) {
+      setClashCred(applyRecovery);
+      setRecoveryMode(false);
+    }
+
+    if (pendingResponse && !clashLost) {
+      setMomentumFeedbackRequest({
+        streakIncrements,
+        recoveryApplies,
+        challengeResolved,
+      });
+    }
+
+    onPendingResolved?.();
 
     if (mode === "dashboard" && onDashboardSubmit) {
       onDashboardSubmit(text);
@@ -873,11 +1350,23 @@ export default function ClashBotSheet({
     }));
   }
 
+  function handleDefendClaim(claim: ClaimItem) {
+    const text = claim.text.trim();
+    if (!text) return;
+
+    setDashboardVerifyTarget(text);
+    onDefendClaim?.(text);
+    setTimeout(() => inputRef.current?.focus(), 0);
+  }
+
+  function handleChallengeClaim(claim: ClaimItem) {
+    onChallengeClaim?.(claim.id);
+  }
+
   function renderClaimCard(claim: ClaimItem, options?: { nested?: boolean }) {
     const verification = claim.verification;
     const topMatch: FactCheckMatch | undefined =
       verification?.top || verification?.matches?.[0];
-    const message = verification?.message;
     const sourceType = getSourceTypeLabel(verification);
     const evidenceSummary = getEvidenceSummary(verification);
     const evidenceDate = formatEvidenceDate(topMatch?.claimDate, verification?.mode);
@@ -908,13 +1397,44 @@ export default function ClashBotSheet({
     const evidenceReps = getEvidenceRepresentatives(verification);
 
     const helperText =
+      verification?.shortWhyItWon ??
       getResultExplanation({
         status: claim.status,
         stance: claim.verification?.stance,
         reasonCode: statusBadge.reasonCode,
         confidenceTier: claim.verification?.confidenceTier,
         representativeCount: cardRepCount,
-      }) ?? getReasonCodeHelperText(statusBadge.reasonCode);
+      }) ??
+      getReasonCodeHelperText(statusBadge.reasonCode);
+
+    const verdictHit = getVerdictHit(claim);
+    const reactionLine = getReactionLine(claim);
+    const resultTypeLabel = getResultTypeLabel(verification);
+
+    const isOpinion = claim.isSubjective === true;
+    const cardDisplayVerdict = verification?.displayVerdict;
+    const cardTone = cardDisplayVerdict?.tone;
+    const displayVerdictHit = cardTone
+      ? getVerdictWordByTone(cardTone, isOpinion)
+      : (isOpinion ? "TAKE" : verdictHit);
+    const displayReaction = cardDisplayVerdict?.label
+      ?? (isOpinion ? "This is a clash of takes, not a verified fact." : reactionLine);
+    const displaySublabel = cardDisplayVerdict?.sublabel ?? null;
+    const verdictBg = cardTone
+      ? getVerdictBackgroundByTone(cardTone)
+      : (isOpinion ? { backgroundColor: "#1e3a5f" } : getVerdictBackground(verdictHit));
+    const heroTextStyle = cardTone
+      ? getVerdictTextStyleByTone(cardTone, isOpinion)
+      : (isOpinion ? styles.verdictHitNeutral : getVerdictHitTone(verdictHit));
+    const displayStatusLabel = isOpinion ? "Opinion" : statusBadge.label;
+    const displayHelperText = isOpinion ? null : helperText;
+    const secondsLeft =
+      claim.pendingResponse && claim.responseDeadline
+        ? Math.max(1, Math.ceil((claim.responseDeadline - now) / 1000))
+        : 0;
+    const showResponseCountdown =
+      claim.pendingResponse && !!claim.responseDeadline && claim.responseDeadline > now;
+    const showChallengeButton = !claim.pendingResponse && !claim.challengedBy;
 
     return (
       <View
@@ -926,7 +1446,7 @@ export default function ClashBotSheet({
       >
         <View style={styles.claimTopRow}>
           <View style={[styles.statusBadge, statusBadge.style]}>
-            <Text style={styles.statusBadgeText}>{statusBadge.label}</Text>
+            <Text style={styles.statusBadgeText}>{displayStatusLabel}</Text>
           </View>
 
           {topMatch?.url ? (
@@ -939,9 +1459,77 @@ export default function ClashBotSheet({
           ) : null}
         </View>
 
-        {!!helperText && <Text style={styles.badgeHelperText}>{helperText}</Text>}
+        <View style={[styles.verdictHero, verdictBg]}>
+          <Text style={[styles.verdictHeroText, heroTextStyle]}>
+            {displayVerdictHit}
+          </Text>
 
-        <Text style={styles.claimText}>{claim.text}</Text>
+          <Text style={styles.reactionHeroText}>{displayReaction}</Text>
+
+          {!!displaySublabel && (
+            <Text style={styles.heroSublabelText}>{displaySublabel}</Text>
+          )}
+
+          <Text style={styles.claimHeroText}>{claim.text}</Text>
+        </View>
+
+        {showResponseCountdown && (
+          <>
+            <Text style={styles.responseCountdownText}>
+              ⏳ Respond in {secondsLeft}s
+            </Text>
+
+            <Pressable
+              onPress={() => handleDefendClaim(claim)}
+              style={styles.defendClaimButton}
+            >
+              <Text style={styles.defendClaimButtonText}>DEFEND CLAIM</Text>
+            </Pressable>
+          </>
+        )}
+
+        {!!claim.challengedBy && (
+          <Text style={styles.challengedByText}>
+            ⚔️ Challenged by @{claim.challengedBy.userName}
+          </Text>
+        )}
+
+        {showChallengeButton && (
+          <Pressable
+            onPress={() => handleChallengeClaim(claim)}
+            style={styles.challengeClaimButton}
+          >
+            <Text style={styles.challengeClaimButtonText}>CHALLENGE CLAIM</Text>
+          </Pressable>
+        )}
+
+        {!isOpinion && (
+          <View style={styles.metaRowNew}>
+            {!!verification?.confidenceLabel && (
+              <View style={styles.metaPill}>
+                <Text style={styles.metaPillText}>
+                  {verification.confidenceLabel}
+                </Text>
+              </View>
+            )}
+
+            {!!resultTypeLabel && (
+              <View style={styles.metaPill}>
+                <Text style={styles.metaPillText}>{resultTypeLabel}</Text>
+              </View>
+            )}
+
+            {verification?.confidenceScore != null && (
+              <Text style={styles.metaScore}>
+                {verification.confidenceScore}/100
+              </Text>
+            )}
+          </View>
+        )}
+
+        {!!displayHelperText && (
+          <Text style={styles.whySlimText}>{displayHelperText}</Text>
+        )}
 
         <View style={styles.timelineWrap}>
           <View style={styles.timelineRow}>
@@ -1034,48 +1622,113 @@ export default function ClashBotSheet({
           {!!metaLine && <Text style={styles.timelineMetaText}>{metaLine}</Text>}
         </View>
 
-        <View style={styles.verdictRow}>
-          <View style={[styles.verdictBadge, getVerdictTone(claim)]}>
-            <Text style={[styles.verdictBadgeText, getVerdictTextTone(claim)]}>
-              {getVerdictLabel(claim)}
+        {claim.status === "no_match" && !!claim.suggestedText && (
+          <Pressable
+            onPress={() => onSubmitClaim(claim.suggestedText!)}
+            style={styles.suggestionChip}
+          >
+            <Text style={styles.suggestionChipText}>
+              Did you mean: {claim.suggestedText}?
             </Text>
-          </View>
+          </Pressable>
+        )}
 
-          {!!verification?.mode && (
-            <Text style={styles.verdictMetaText}>
-              {verification.mode === "fact_check"
-                ? "Fact Check"
-                : "Recent Coverage"}
-            </Text>
-          )}
-        </View>
+        {!!verification && !isOpinion && (
+          <>
+            <View style={styles.metaRow}>
+              <View style={styles.sourceTypeBadge}>
+                <Text style={styles.sourceTypeBadgeText}>{sourceType}</Text>
+              </View>
 
-        {!!verification?.confidenceTier && (
-          <View style={styles.confidenceStrip}>
-            <View
-              style={[
-                styles.confidenceTierBadge,
-                verification.confidenceTier === "high"
-                  ? styles.confidenceTierHigh
-                  : verification.confidenceTier === "medium"
-                    ? styles.confidenceTierMedium
-                    : verification.confidenceTier === "low"
-                      ? styles.confidenceTierLow
-                      : styles.confidenceTierNone,
-              ]}
-            >
-              <Text style={styles.confidenceTierText}>
-                {verification.confidenceTier.charAt(0).toUpperCase() +
-                  verification.confidenceTier.slice(1)}{" "}
-                confidence
-              </Text>
+              {(!!topMatch?.publisher || !!evidenceDate) && (
+                <Text style={styles.publisherText} numberOfLines={1}>
+                  {[topMatch?.publisher, evidenceDate].filter(Boolean).join(" · ")}
+                </Text>
+              )}
             </View>
-            {verification.confidenceScore != null && (
-              <Text style={styles.confidenceScoreText}>
-                {verification.confidenceScore}/100
-              </Text>
+
+            {!!evidenceSummary && (
+              <Text style={styles.evidenceSummaryText}>{evidenceSummary}</Text>
             )}
-          </View>
+
+            {!!topMatch && (
+              <Pressable
+                onPress={topMatch.url ? () => openLink(topMatch.url) : undefined}
+                style={styles.topSourceCard}
+              >
+                <Text style={styles.sourceItemTitle} numberOfLines={2}>
+                  {topMatch.title || topMatch.claimReviewed || "Top source"}
+                </Text>
+                {!!topMatch.publisher && (
+                  <Text style={styles.sourceItemPublisher}>
+                    {topMatch.publisher}
+                  </Text>
+                )}
+                {!!(topMatch.rating?.text || topMatch.rating?.raw) && (
+                  <Text style={styles.sourceItemRating}>
+                    {topMatch.rating?.text || topMatch.rating?.raw}
+                  </Text>
+                )}
+                {!!topMatch.url && (
+                  <Text style={styles.sourceItemTap}>Open source →</Text>
+                )}
+              </Pressable>
+            )}
+
+            {evidenceReps.length > 0 && (
+              <View style={styles.evidencePreview}>
+                {evidenceReps.map((rep, idx) => {
+                  const repDate =
+                    formatEvidenceDate(rep.claimDate, verification?.mode) ??
+                    undefined;
+                  const repMeta = [rep.publisher, repDate].filter(Boolean).join(" · ");
+                  const repRating = rep.rating?.text ?? rep.rating?.raw ?? null;
+
+                  return (
+                    <Pressable
+                      key={`${claim.id}-rep-${idx}`}
+                      onPress={rep.url ? () => openLink(rep.url) : undefined}
+                      style={styles.sourceItem}
+                    >
+                      <View style={styles.sourceItemTopRow}>
+                        <Text style={styles.sourceItemTitle} numberOfLines={2}>
+                          {rep.title || rep.claimReviewed || "Source"}
+                        </Text>
+
+                        {!!rep.provider && (
+                          <View style={styles.miniSourceBadge}>
+                            <Text style={styles.miniSourceBadgeText}>
+                              {getEvidenceProviderLabel(rep.provider)}
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+
+                      {!!repMeta && (
+                        <Text style={styles.sourceItemPublisher} numberOfLines={1}>
+                          {repMeta}
+                        </Text>
+                      )}
+
+                      {!!repRating && (
+                        <Text style={styles.sourceItemRating} numberOfLines={1}>
+                          {repRating}
+                        </Text>
+                      )}
+
+                      {!!rep.url && (
+                        <Text style={styles.sourceItemTap}>
+                          {rep.publisher
+                            ? `Open ${rep.publisher} →`
+                            : "Open source →"}
+                        </Text>
+                      )}
+                    </Pressable>
+                  );
+                })}
+              </View>
+            )}
+          </>
         )}
 
         <View style={styles.debugCard}>
@@ -1140,122 +1793,6 @@ export default function ClashBotSheet({
         </View>
 
         {__DEV__ && <VerificationTracePanel claim={claim} />}
-
-        {claim.status === "no_match" && !!claim.suggestedText && (
-          <Pressable
-            onPress={() => onSubmitClaim(claim.suggestedText!)}
-            style={styles.suggestionChip}
-          >
-            <Text style={styles.suggestionChipText}>
-              Did you mean: {claim.suggestedText}?
-            </Text>
-          </Pressable>
-        )}
-
-        {!!verification && (
-          <>
-            <View style={styles.metaRow}>
-              <View style={styles.sourceTypeBadge}>
-                <Text style={styles.sourceTypeBadgeText}>{sourceType}</Text>
-              </View>
-
-              {(!!topMatch?.publisher || !!evidenceDate) && (
-                <Text style={styles.publisherText} numberOfLines={1}>
-                  {[topMatch?.publisher, evidenceDate].filter(Boolean).join(" · ")}
-                </Text>
-              )}
-            </View>
-
-            {!!message && <Text style={styles.messageText}>{message}</Text>}
-
-            {!!verification?.relevance?.reason && (
-              <Text style={styles.relevanceText}>
-                Relevance: {verification.relevance.reason}
-              </Text>
-            )}
-
-            {!!evidenceSummary && (
-              <Text style={styles.evidenceSummaryText}>{evidenceSummary}</Text>
-            )}
-
-            {!!topMatch && (
-              <Pressable
-                onPress={topMatch.url ? () => openLink(topMatch.url) : undefined}
-                style={styles.topSourceCard}
-              >
-                <Text style={styles.sourceItemTitle} numberOfLines={2}>
-                  {topMatch.title || topMatch.claimReviewed || "Top source"}
-                </Text>
-                {!!topMatch.publisher && (
-                  <Text style={styles.sourceItemPublisher}>
-                    {topMatch.publisher}
-                  </Text>
-                )}
-                {!!(topMatch.rating?.text || topMatch.rating?.raw) && (
-                  <Text style={styles.sourceItemRating}>
-                    {topMatch.rating?.text || topMatch.rating?.raw}
-                  </Text>
-                )}
-                {!!topMatch.url && (
-                  <Text style={styles.sourceItemTap}>Open source →</Text>
-                )}
-              </Pressable>
-            )}
-
-            {evidenceReps.length > 0 && (
-              <View style={styles.evidencePreview}>
-                {evidenceReps.map((rep, idx) => {
-                  const repDate =
-                    formatEvidenceDate(rep.claimDate, verification?.mode) ?? undefined;
-                  const repMeta = [rep.publisher, repDate].filter(Boolean).join(" · ");
-                  const repRating = rep.rating?.text ?? rep.rating?.raw ?? null;
-
-                  return (
-                    <Pressable
-                      key={`${claim.id}-rep-${idx}`}
-                      onPress={rep.url ? () => openLink(rep.url) : undefined}
-                      style={styles.sourceItem}
-                    >
-                      <View style={styles.sourceItemTopRow}>
-                        <Text style={styles.sourceItemTitle} numberOfLines={2}>
-                          {rep.title || rep.claimReviewed || "Source"}
-                        </Text>
-
-                        {!!rep.provider && (
-                          <View style={styles.miniSourceBadge}>
-                            <Text style={styles.miniSourceBadgeText}>
-                              {getEvidenceProviderLabel(rep.provider)}
-                            </Text>
-                          </View>
-                        )}
-                      </View>
-
-                      {!!repMeta && (
-                        <Text style={styles.sourceItemPublisher} numberOfLines={1}>
-                          {repMeta}
-                        </Text>
-                      )}
-
-                      {!!repRating && (
-                        <Text style={styles.sourceItemRating} numberOfLines={1}>
-                          {repRating}
-                        </Text>
-                      )}
-
-                      {!!rep.url && (
-                        <Text style={styles.sourceItemTap}>
-                          {rep.publisher
-                            ? `Open ${rep.publisher} →`
-                            : "Open source →"}
-                        </Text>
-                      )}
-                    </Pressable>
-                  );
-                })}
-              </View>
-            )}
-          </>
-        )}
       </View>
     );
   }
@@ -1264,6 +1801,14 @@ export default function ClashBotSheet({
 
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
+      <ClashVerdictOverlay
+        visible={overlayVisible}
+        verdict={overlayVerdict}
+        reactionLine={overlayReaction}
+        claimText={overlayClaimText}
+        onClose={() => setOverlayVisible(false)}
+      />
+
       <View style={styles.backdropPressable} />
 
       <KeyboardAvoidingView
@@ -1286,12 +1831,38 @@ export default function ClashBotSheet({
             <View>
               <Text style={styles.title}>ClashBot</Text>
               <Text style={styles.subtitle}>{titleText}</Text>
+              <Text style={styles.credHeader}>ClashCred: {clashCred}</Text>
+              <Text style={styles.streakHeader}>🔥 Streak: {streak}</Text>
+              {streak > 0 && !pendingResponse && (
+                <Text style={styles.streakGain}>🔥 {streak} Win Streak</Text>
+              )}
+              {!!momentumFeedback && (
+                <Text style={styles.momentumFeedback}>{momentumFeedback}</Text>
+              )}
             </View>
 
-            <Pressable onPress={onClose} style={styles.closeButton}>
-              <Text style={styles.closeButtonText}>Close</Text>
-            </Pressable>
+            <View style={styles.headerButtons}>
+              {Platform.OS === "android" && (
+                <Pressable onPress={enterPiP} disabled={!closeEnabled} style={styles.pipButton}>
+                  <Text style={styles.pipButtonText}>⊟</Text>
+                </Pressable>
+              )}
+              <Pressable
+                onPress={() => { if (!isBlockingClash) onClose(); }}
+                style={[styles.closeButton, isBlockingClash && { opacity: 0.4 }]}
+              >
+                <Text style={styles.closeButtonText}>Close</Text>
+              </Pressable>
+            </View>
           </View>
+
+          {pendingResponse && (
+            <View style={[styles.pendingResponseBadge, escalationLevel >= 2 && styles.pendingResponseBadgeEscalated]}>
+              <Text style={[styles.pendingResponseBadgeText, escalationLevel >= 2 && styles.pendingResponseBadgeTextEscalated]}>
+                {clashLost ? "❌ You lost this clash" : "⚠️ You haven't responded"}
+              </Text>
+            </View>
+          )}
 
           {mode === "dashboard" ? (
             <View style={styles.inputRow}>
@@ -1301,9 +1872,12 @@ export default function ClashBotSheet({
                 onChangeText={setDraft}
                 placeholder="Type a claim..."
                 placeholderTextColor="rgba(15, 23, 42, 0.45)"
+                editable={!clashLost}
                 style={[
                   styles.input,
                   Platform.OS === "android" && { includeFontPadding: false },
+                  pendingResponse && styles.inputDimmed,
+                  clashLost && styles.inputLocked,
                 ]}
                 onSubmitEditing={handleSubmit}
                 returnKeyType="done"
@@ -1316,6 +1890,14 @@ export default function ClashBotSheet({
               </Pressable>
             </View>
           ) : null}
+
+          {pendingResponse && draft.trim().length > 0 && (
+            <View style={styles.escapeWarning}>
+              <Text style={styles.escapeWarningText}>
+                ⚠️ Finish your current clash first
+              </Text>
+            </View>
+          )}
 
           {draftSuggestion ? (
             <Pressable
@@ -1363,8 +1945,140 @@ export default function ClashBotSheet({
               contentContainerStyle={styles.scrollContent}
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}
+              onScroll={(e) => {
+                if (pendingResponse && e.nativeEvent.contentOffset.y > 80) {
+                  showPressureToast();
+                  setEscalationLevel(2);
+                }
+              }}
+              scrollEventThrottle={100}
             >
               <Text style={styles.sectionTitle}>Claims</Text>
+
+              <View style={{ marginBottom: 12 }}>
+                {verifyingClaim && (
+                  <Text style={{ fontWeight: "800", color: "#0b1723", marginBottom: 4 }}>
+                    🔴 Now Checking:
+                  </Text>
+                )}
+
+                {verifyingClaim && (
+                  <Text numberOfLines={2} style={{ marginBottom: 8 }}>
+                    {verifyingClaim.text}
+                  </Text>
+                )}
+
+                {nextQueuedClaims.length > 0 && (
+                  <Text style={{ fontWeight: "800", color: "#0b1723", marginBottom: 4 }}>
+                    ⏭ Next Up:
+                  </Text>
+                )}
+
+                {nextQueuedClaims.map((c) => (
+                  <Text key={c.id} numberOfLines={1} style={{ opacity: 0.7 }}>
+                    • {c.text}
+                  </Text>
+                ))}
+              </View>
+
+              {activeClashPair && (
+                <View style={[styles.clashCard, pendingResponse && styles.clashCardPending]}>
+                  <Text style={styles.clashCardTitle}>
+                    {isOpinionClash ? "Opinion Clash" : "Clash in Progress"}
+                  </Text>
+
+                  {isOpinionClash ? (
+                    <Text style={styles.clashOpinionSubtext}>
+                      This is a clash of takes, not a verified fact.
+                    </Text>
+                  ) : clashEdgeLabel ? (
+                    <Text style={styles.clashEdgeText}>{clashEdgeLabel}</Text>
+                  ) : null}
+
+                  {!!challengerMessage && (
+                    <Text style={styles.challengerMessage}>
+                      {challengerMessage}
+                    </Text>
+                  )}
+
+                  <View style={styles.clashRow}>
+                    <View style={styles.clashSide}>
+                      <Text style={styles.clashSideLabel}>Side A</Text>
+                      <Text style={styles.clashClaimText} numberOfLines={3}>
+                        {activeClashPair.left.text}
+                      </Text>
+                    </View>
+
+                    <View style={styles.clashVsWrap}>
+                      <Text style={styles.clashVsText}>VS</Text>
+                    </View>
+
+                    <View style={styles.clashSide}>
+                      <Text style={styles.clashSideLabel}>Side B</Text>
+                      <Text style={styles.clashClaimText} numberOfLines={3}>
+                        {activeClashPair.right.text}
+                      </Text>
+                    </View>
+                  </View>
+
+                  {clashLost && (
+                    <>
+                      <Text style={styles.clashEscalationText}>
+                        ❌ You lost this clash
+                      </Text>
+                      <Text style={styles.clashSideBWins}>Side B wins</Text>
+                      {lastCredDelta !== null && (
+                        <Text style={styles.credDelta}>
+                          ClashCred: {clashCred - lastCredDelta} → {clashCred}
+                        </Text>
+                      )}
+                      {streak === 0 && (
+                        <Text style={styles.streakLoss}>💔 Streak lost</Text>
+                      )}
+                      {recoveryMode && (
+                        <Text style={styles.recoveryText}>
+                          🔥 Win it back — respond to recover points
+                        </Text>
+                      )}
+                    </>
+                  )}
+
+                  {clashLost && (
+                    <View style={styles.lossExplanation}>
+                      <Text style={styles.lossExplanationReason}>
+                        You didn't respond in time
+                      </Text>
+
+                      <Text style={styles.lossExplanationContext}>
+                        This is an opinion clash — no single correct answer
+                      </Text>
+
+                      <Text style={styles.lossExplanationArgsLabel}>
+                        Common arguments for Side B:
+                      </Text>
+                      <Text style={styles.lossExplanationArg}>· More customizable</Text>
+                      <Text style={styles.lossExplanationArg}>· Better value for price</Text>
+                      <Text style={styles.lossExplanationArg}>· More device options</Text>
+                    </View>
+                  )}
+
+                  {recoveryMode ? (
+                    <Pressable
+                      onPress={() => inputRef.current?.focus()}
+                      style={styles.respondCtaButton}
+                    >
+                      <Text style={styles.respondCtaText}>Defend Again</Text>
+                    </Pressable>
+                  ) : pendingResponse ? (
+                    <Pressable
+                      onPress={() => inputRef.current?.focus()}
+                      style={styles.respondCtaButton}
+                    >
+                      <Text style={styles.respondCtaText}>Defend Your Claim</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              )}
 
               {familyViews.length === 0 ? (
                 <View style={styles.emptyCard}>
@@ -1483,6 +2197,14 @@ export default function ClashBotSheet({
               </View>
             </ScrollView>
           ) : null}
+
+          {toastVisible && (
+            <View style={styles.pressureToast} pointerEvents="none">
+              <Text style={styles.pressureToastText}>
+                This challenge is still waiting on you
+              </Text>
+            </View>
+          )}
         </View>
       </KeyboardAvoidingView>
     </View>
@@ -1523,12 +2245,9 @@ const styles = StyleSheet.create({
 
   quickStatusCard: {
     marginBottom: 6,
-    padding: 12,
-    borderRadius: 14,
-    backgroundColor: "rgba(15, 23, 42, 0.07)",
-    borderWidth: 1,
-    borderColor: "rgba(15, 23, 42, 0.12)",
-    gap: 8,
+    borderRadius: 22,
+    overflow: "hidden",
+    backgroundColor: "rgba(15,23,42,0.04)",
   },
 
   quickStatusText: {
@@ -1557,7 +2276,8 @@ const styles = StyleSheet.create({
   },
 
   quickEvidenceWrap: {
-    marginTop: 4,
+    padding: 14,
+    gap: 8,
   },
 
   sheetDashboard: {
@@ -1591,6 +2311,25 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: "rgba(11, 23, 35, 0.72)",
     marginTop: 2,
+  },
+
+  headerButtons: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+
+  pipButton: {
+    backgroundColor: "rgba(34,211,238,0.08)",
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 16,
+  },
+
+  pipButtonText: {
+    fontSize: 18,
+    fontWeight: "800",
+    color: "#22d3ee",
   },
 
   closeButton: {
@@ -1846,6 +2585,54 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
 
+  responseCountdownText: {
+    fontSize: 13,
+    fontWeight: "900",
+    color: "#dc2626",
+    marginBottom: 8,
+  },
+
+  defendClaimButton: {
+    alignSelf: "flex-start",
+    backgroundColor: "rgba(239, 68, 68, 0.16)",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.42)",
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginBottom: 12,
+  },
+
+  defendClaimButtonText: {
+    fontSize: 12,
+    fontWeight: "900",
+    color: "#991b1b",
+  },
+
+  challengedByText: {
+    fontSize: 12,
+    fontWeight: "900",
+    color: "#7f1d1d",
+    marginBottom: 8,
+  },
+
+  challengeClaimButton: {
+    alignSelf: "flex-start",
+    backgroundColor: "rgba(245, 158, 11, 0.14)",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(245, 158, 11, 0.38)",
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginBottom: 12,
+  },
+
+  challengeClaimButtonText: {
+    fontSize: 12,
+    fontWeight: "900",
+    color: "#92400e",
+  },
+
   timelineWrap: {
     backgroundColor: "rgba(47, 211, 245, 0.08)",
     borderRadius: 18,
@@ -2023,6 +2810,105 @@ const styles = StyleSheet.create({
     color: "rgba(15,23,42,0.45)",
   },
 
+  verdictHitPositive: {
+    color: "#16a34a",
+  },
+
+  verdictHitNegative: {
+    color: "#dc2626",
+  },
+
+  verdictHitWarning: {
+    color: "#f59e0b",
+  },
+
+  verdictHitUnclear: {
+    color: "#7c3aed",
+  },
+
+  verdictHitNeutral: {
+    color: "rgba(15, 23, 42, 0.55)",
+  },
+
+  verdictHero: {
+    position: "relative",
+    padding: 20,
+    borderRadius: 22,
+    marginBottom: 0,
+    overflow: "hidden",
+    shadowColor: "#000",
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
+  },
+
+  verdictHeroText: {
+    fontSize: 52,
+    fontWeight: "900",
+    letterSpacing: 2,
+    color: "#ffffff",
+  },
+
+  reactionHeroText: {
+    fontSize: 20,
+    lineHeight: 24,
+    fontWeight: "800",
+    color: "rgba(255,255,255,0.92)",
+    marginTop: 6,
+  },
+
+  heroSublabelText: {
+    fontSize: 13,
+    lineHeight: 17,
+    fontWeight: "500",
+    color: "rgba(255,255,255,0.62)",
+    marginTop: 4,
+  },
+
+  claimHeroText: {
+    fontSize: 15,
+    lineHeight: 20,
+    fontWeight: "600",
+    color: "rgba(255,255,255,0.72)",
+    marginTop: 10,
+    marginBottom: 14,
+  },
+
+  metaRowNew: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+    marginTop: 2,
+  },
+
+  metaPill: {
+    backgroundColor: "rgba(255,255,255,0.14)",
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+
+  metaPillText: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: "#ffffff",
+  },
+
+  metaScore: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "rgba(15,23,42,0.6)",
+  },
+
+  whySlimText: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "rgba(15,23,42,0.5)",
+    marginBottom: 12,
+  },
+
   debugCard: {
     backgroundColor: "rgba(6, 20, 26, 0.05)",
     borderRadius: 18,
@@ -2146,8 +3032,8 @@ const styles = StyleSheet.create({
   evidenceSummaryText: {
     fontSize: 13,
     lineHeight: 20,
-    fontWeight: "800",
-    color: "rgba(15, 23, 42, 0.58)",
+    fontWeight: "700",
+    color: "rgba(15, 23, 42, 0.46)",
     marginBottom: 10,
   },
 
@@ -2255,5 +3141,274 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "800",
     color: "#0b6b7d",
+  },
+
+  clashCard: {
+    backgroundColor: "rgba(255,255,255,0.82)",
+    borderRadius: 24,
+    padding: 16,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.16)",
+  },
+
+  clashCardTitle: {
+    fontSize: 14,
+    fontWeight: "900",
+    color: "#7f1d1d",
+    marginBottom: 12,
+  },
+
+  clashRow: {
+    flexDirection: "row",
+    alignItems: "stretch",
+    gap: 10,
+  },
+
+  clashSide: {
+    flex: 1,
+    backgroundColor: "rgba(15, 23, 42, 0.04)",
+    borderRadius: 16,
+    padding: 12,
+  },
+
+  clashSideLabel: {
+    fontSize: 11,
+    fontWeight: "900",
+    color: "rgba(15, 23, 42, 0.48)",
+    marginBottom: 6,
+  },
+
+  clashClaimText: {
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: "800",
+    color: "#0f172a",
+  },
+
+  clashVsWrap: {
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 2,
+  },
+
+  clashVsText: {
+    fontSize: 18,
+    fontWeight: "900",
+    color: "#b91c1c",
+  },
+
+  clashEdgeText: {
+    fontSize: 12,
+    fontWeight: "900",
+    color: "#b91c1c",
+    marginBottom: 10,
+  },
+
+  clashOpinionSubtext: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "rgba(15, 23, 42, 0.55)",
+    marginBottom: 6,
+    fontStyle: "italic",
+  },
+
+  challengerMessage: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: "#0b6b7d",
+    marginBottom: 10,
+  },
+
+  pendingResponseBadge: {
+    backgroundColor: "rgba(245, 158, 11, 0.22)",
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "rgba(245, 158, 11, 0.48)",
+  },
+
+  pendingResponseBadgeText: {
+    fontSize: 14,
+    fontWeight: "900",
+    color: "#78350f",
+  },
+
+  respondCtaButton: {
+    marginTop: 12,
+    backgroundColor: "rgba(239, 68, 68, 0.18)",
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: "center",
+    borderWidth: 1.5,
+    borderColor: "rgba(239, 68, 68, 0.46)",
+  },
+
+  respondCtaText: {
+    fontSize: 15,
+    fontWeight: "900",
+    color: "#991b1b",
+    letterSpacing: 0.3,
+  },
+
+  pressureToast: {
+    position: "absolute",
+    bottom: 24,
+    left: 16,
+    right: 16,
+    backgroundColor: "rgba(17, 24, 39, 0.94)",
+    borderRadius: 14,
+    paddingHorizontal: 18,
+    paddingVertical: 13,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "rgba(245, 158, 11, 0.40)",
+  },
+
+  pressureToastText: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: "#fbbf24",
+  },
+
+  inputDimmed: {
+    opacity: 0.5,
+  },
+
+  escapeWarning: {
+    backgroundColor: "rgba(245, 158, 11, 0.14)",
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "rgba(245, 158, 11, 0.30)",
+  },
+
+  escapeWarningText: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: "#92400e",
+  },
+
+  clashCardPending: {
+    borderColor: "rgba(239, 68, 68, 0.46)",
+    borderWidth: 1.5,
+  },
+
+  pendingResponseBadgeEscalated: {
+    backgroundColor: "rgba(239, 68, 68, 0.22)",
+    borderColor: "rgba(239, 68, 68, 0.48)",
+  },
+
+  pendingResponseBadgeTextEscalated: {
+    color: "#991b1b",
+  },
+
+  clashEscalationText: {
+    fontSize: 13,
+    fontWeight: "900",
+    color: "#dc2626",
+    marginBottom: 4,
+    marginTop: 4,
+  },
+
+  clashSideBWins: {
+    fontSize: 12,
+    fontWeight: "900",
+    color: "#dc2626",
+    marginBottom: 8,
+    letterSpacing: 0.5,
+    opacity: 0.72,
+  },
+
+  inputLocked: {
+    opacity: 0.35,
+    backgroundColor: "rgba(239, 68, 68, 0.08)",
+  },
+
+  credDelta: {
+    fontSize: 13,
+    fontWeight: "900",
+    color: "#dc2626",
+    marginTop: 4,
+  },
+
+  credHeader: {
+    fontSize: 14,
+    fontWeight: "900",
+    color: "#0f172a",
+    marginBottom: 6,
+  },
+
+  streakHeader: {
+    fontSize: 13,
+    fontWeight: "900",
+    color: "#f97316",
+    marginBottom: 4,
+  },
+
+  streakGain: {
+    fontSize: 13,
+    fontWeight: "900",
+    color: "#16a34a",
+    marginTop: 4,
+  },
+
+  momentumFeedback: {
+    fontSize: 12,
+    fontWeight: "900",
+    color: "#0b6b7d",
+    marginTop: 4,
+  },
+
+  streakLoss: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#dc2626",
+    marginTop: 2,
+  },
+
+  recoveryText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#f97316",
+    marginTop: 6,
+  },
+
+  lossExplanation: {
+    backgroundColor: "rgba(239, 68, 68, 0.06)",
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 10,
+    gap: 6,
+  },
+
+  lossExplanationReason: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#991b1b",
+  },
+
+  lossExplanationContext: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "rgba(15, 23, 42, 0.52)",
+    fontStyle: "italic",
+  },
+
+  lossExplanationArgsLabel: {
+    fontSize: 11,
+    fontWeight: "900",
+    color: "rgba(15, 23, 42, 0.48)",
+    marginTop: 4,
+  },
+
+  lossExplanationArg: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "rgba(15, 23, 42, 0.60)",
   },
 });

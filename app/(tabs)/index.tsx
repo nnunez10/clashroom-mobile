@@ -110,6 +110,7 @@ export default function HomeScreen() {
   const speechActiveRef = useRef(false);
   const speechSessionRef = useRef(0);
   const speechEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSubmitAtRef = useRef(0);
   const isListeningShared = useSharedValue(false);
 
   const {
@@ -124,8 +125,11 @@ export default function HomeScreen() {
   // Detect when a user-submitted claim becomes a clash
   useEffect(() => {
     if (pendingResponse) return;
+    // Only count claims that the engine has flagged as needing a timed defense
+    // (pendingResponse on the claim itself). Subjective clash pairs are isClash:true
+    // but have no pendingResponse — they must not lock the close button.
     const hasClash = claims.some(
-      (c: any) => c.isClash && userSubmittedTextsRef.current.has(c.text)
+      (c: any) => c.isClash && c.pendingResponse && userSubmittedTextsRef.current.has(c.text)
     );
     const hasManualChallenge = claims.some(
       (c: any) => c.pendingResponse && c.challengedBy
@@ -173,13 +177,26 @@ export default function HomeScreen() {
     setIsListeningForClaim(false);
 
     const next = speechTextRef.current.trim();
-    if (!next) {
+    if (!next || next.length < 15 || next.split(/\s+/).length < 3) {
       setVoiceHint("Didn't catch that. Hold and try again.");
       return;
     }
+    if (userSubmittedTextsRef.current.has(next)) return;
+    const now = Date.now();
+    if (now - lastSubmitAtRef.current < 2000) return;
+    lastSubmitAtRef.current = now;
 
-    setQuickDraft(next);
-    setVoiceHint("Draft ready. Hit Verify.");
+    if (isSubjectiveClaim(next)) {
+      console.log(`[commitSpeechDraft] subjective claim detected, opening dashboard: "${next.slice(0, 80)}"`);
+      handleDirectSubmit(next);
+      openDashboard();
+      setVoiceHint("Subjective — showing as clash.");
+      return;
+    }
+
+    setVoiceHint("Verifying...");
+    handleDirectSubmit(next);
+    openQuickVerify(next);
   }
 
   function startPushToClaim() {
@@ -595,10 +612,6 @@ export default function HomeScreen() {
             const t = text.trim();
             if (!t) return;
             setPendingQuickClaim(t);
-            if (isSubjectiveClaim(t)) {
-              console.log("SET pendingResponse TRUE at submit");
-              setPendingResponse(true);
-            }
             handleDirectSubmit(t);
             if (!isSubjectiveClaim(t) && !pendingResponse) {
               setSheetMode("quick_verify");

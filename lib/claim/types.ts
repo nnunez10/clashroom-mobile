@@ -76,7 +76,88 @@ export type ReasonCode =
   | "insufficient_evidence"        // Signals present but below the confidence threshold
   | "source_not_relevant"          // Source found but doesn't align with the claim
   | "no_reliable_match"            // No source found (no_match outcome)
-  | "provider_error";              // Verification infrastructure failed
+  | "provider_error"               // Verification infrastructure failed
+  | "subjective_claim";            // Opinion/preference — not verifiable by fact-checking
+
+// ---------------------------------------------------------------------------
+// VerdictTrace — internal reasoning and audit trail
+// Two-layer model: VerdictTrace is internal (never rendered directly);
+// DisplayVerdict is derived from it and drives UI rendering.
+// ---------------------------------------------------------------------------
+
+export type ConsensusStrength = "unanimous" | "majority" | "split" | "absent";
+
+export type EvidenceStance =
+  | "evidence_supports"     // evidence found for the claim
+  | "evidence_contradicts"  // evidence found against the claim
+  | "evidence_mixed"        // evidence found on both sides
+  | "evidence_absent"       // no evidence found
+  | "not_applicable";       // subjective claim — stance concept doesn't apply
+
+export type VerdictKind =
+  | "authoritative_match"   // fact-checker reviewed this specific claim
+  | "override_match"        // KnownFacts database hit
+  | "coverage_match"        // news/web coverage only, no direct fact-check
+  | "contested"             // genuine expert disagreement
+  | "subjective"            // opinion or preference — not verifiable
+  | "unverifiable"          // no sources found
+  | "stale_data"            // real-time claim — data cannot confirm now
+  | "error";                // provider failure
+
+export type ClaimType =
+  | "factual"      // verifiable objective claim
+  | "subjective"   // opinion or preference
+  | "predictive"   // future-oriented claim
+  | "real_time"    // "today", "right now", "currently"
+  | "statistical"; // number or data claim
+
+export type EvidenceDirectness =
+  | "direct"    // sources explicitly fact-check this claim
+  | "indirect"  // adjacent coverage — topic-related but not exact
+  | "none";
+
+export type SourceDiversity =
+  | "diverse"        // 3+ orgs, or 2+ provider types
+  | "single_type"    // one provider type, 2+ sources
+  | "single_source"  // exactly one source
+  | "none";
+
+export type Freshness =
+  | "current"         // sources recent enough for the claim type
+  | "dated"           // sources older than threshold for time-sensitive claims
+  | "real_time_gap"   // claim is about right now — cannot be verified
+  | "unknown";
+
+export type VerdictTone =
+  | "contradicted"   // evidence found against
+  | "supported"      // evidence found for
+  | "contested"      // experts genuinely disagree
+  | "unverifiable"   // no evidence found
+  | "subjective"     // opinion, not fact-checkable
+  | "stale";         // cannot verify in real time
+
+export interface VerdictTrace {
+  evidenceStance: EvidenceStance;
+  claimType: ClaimType;
+  verdictKind: VerdictKind;
+  reasonCode: ReasonCode;
+  evidenceDirectness: EvidenceDirectness;
+  sourceDiversity: SourceDiversity;
+  consensusStrength: ConsensusStrength;
+  freshness: Freshness;
+  sourceCount: number;
+  overrideUsed: boolean;
+  confidence: ConfidenceTier;
+  _confidenceScore: number;  // internal only — not for UI display
+  reasons: string[];         // deterministic template strings, max 3
+}
+
+export interface DisplayVerdict {
+  label: string;                                            // e.g. "Evidence disputes this"
+  sublabel: string;                                         // e.g. "3 fact-checkers reviewed this"
+  tone: VerdictTone;                                        // drives color/icon/animation
+  clashMechanic: "factual_clash" | "subjective_clash" | "none";
+}
 
 export interface RelevanceAssessment {
   relevant: boolean;
@@ -170,6 +251,8 @@ export interface EvidenceRecord {
   /** @deprecated Phase 4: replace with stance: Stance */
   contradicts?: boolean;
   stance?: Stance;
+  /** Human-readable explanation of why this match was selected, e.g. "Matched on Pam Bondi + firing". */
+  matchWhy?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -184,7 +267,8 @@ export type ClaimEventType =
   | "error"
   | "disputed"
   | "override_applied"
-  | "family_linked";
+  | "family_linked"
+  | "auto_loss_no_response";
 
 export interface ClaimEvent {
   type: ClaimEventType;
@@ -222,6 +306,9 @@ export interface Claim {
   ts: number;
 
   status: ClaimStatus;
+
+  pendingResponse?: boolean;
+  responseDeadline?: number;
 
   /** @deprecated Phase 6: move exclusively into timeline */
   checkingAt?: number;

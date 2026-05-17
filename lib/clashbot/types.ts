@@ -10,6 +10,10 @@ export type FactCheckMatch = {
 
   claim: string;
 
+  /** The specific claim text reviewed by the fact-checker (distinct from `claim`,
+   *  which is the text submitted by the user). Populated only by google_factcheck. */
+  claimReviewed?: string;
+
   // For google_factcheck this may be claimDate.
   // For bing_news we store article published time here.
   claimDate?: string;
@@ -23,6 +27,10 @@ export type FactCheckMatch = {
   rating?: FactCheckRating;
 
   snippet?: string;
+
+  /** SerpAPI organic result position (1-indexed). Used as a ranking signal
+   *  in scoreMatchForClaim — Google's own relevance order is meaningful. */
+  serpApiPosition?: number;
 };
 
 export type VerificationResult =

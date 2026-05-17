@@ -61,9 +61,12 @@ export async function googleFactCheckSearch(query: string): Promise<Verification
         const title = safeString(r?.title) || undefined;
         const textualRating = safeString(r?.textualRating) || "";
 
+        const claimReviewed = safeString(r?.claimReviewed) || undefined;
+
         matches.push({
           provider: "google_factcheck",
           claim: claimText,
+          claimReviewed,
           claimDate,
           url,
           publisher,
