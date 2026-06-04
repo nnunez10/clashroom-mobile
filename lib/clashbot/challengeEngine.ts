@@ -63,9 +63,9 @@ export type ChallengeStatus =
 export function getChallengeStatus(claim: ChallengeTarget, now = Date.now()): ChallengeStatus {
   if (!claim.challengedBy) return "unchallenged";
 
-  if (!claim.pendingResponse) return "defended";
-
   if (claim.responseDeadline !== undefined && now > claim.responseDeadline) return "expired";
+
+  if (!claim.pendingResponse) return "defended";
 
   return "challenged";
 }

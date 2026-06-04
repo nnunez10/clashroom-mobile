@@ -140,6 +140,7 @@ type ClaimItem = {
   isSubjective?: boolean;
   pendingResponse?: boolean;
   responseDeadline?: number;
+  challengeMode?: "live" | "async";
   authorId?: string;
   authorName?: string;
   challengedBy?: {
@@ -172,6 +173,7 @@ type ClashBotSheetProps = {
   onPendingResolved?: () => void;
   onStartPending?: () => void;
   onDefendClaim?: (text: string) => void;
+  onDefendSubmit?: (challengedClaimId: string, text: string) => void;
   onChallengeClaim?: (claimId: string) => void;
 };
 
@@ -470,6 +472,25 @@ function formatRelativeMs(ms?: number) {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
 
   return `${Math.floor(seconds / 3600)}h`;
+}
+
+function formatChallengeTimeLeft(
+  ms: number,
+  mode: ClaimItem["challengeMode"] = "live"
+) {
+  const seconds = Math.max(1, Math.ceil(ms / 1000));
+
+  if (mode !== "async" || seconds < 60) return `${seconds}s`;
+
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+
+  return remainingMinutes > 0
+    ? `${hours}h ${remainingMinutes}m`
+    : `${hours}h`;
 }
 
 function getClaimMetaLine(claim: ClaimItem) {
@@ -916,6 +937,7 @@ export default function ClashBotSheet({
   onPendingResolved,
   onStartPending,
   onDefendClaim,
+  onDefendSubmit,
   onChallengeClaim,
 }: ClashBotSheetProps) {
   const [draft, setDraft] = useState(initialDraft);
@@ -930,6 +952,7 @@ export default function ClashBotSheet({
   const [lastCredDelta, setLastCredDelta] = useState<number | null>(null);
   const [streak, setStreak] = useState(0);
   const [recoveryMode, setRecoveryMode] = useState(false);
+  const [defendingClaimId, setDefendingClaimId] = useState<string | null>(null);
   const [momentumFeedback, setMomentumFeedback] = useState("");
   const [momentumFeedbackRequest, setMomentumFeedbackRequest] = useState<{
     streakIncrements: boolean;
@@ -1001,6 +1024,16 @@ export default function ClashBotSheet({
     [claims]
   );
 
+  const activePendingClaim = useMemo(
+    () => claims.find((c) => c.pendingResponse) ?? null,
+    [claims]
+  );
+
+  const activeDefendingClaim = useMemo(() => {
+    if (!defendingClaimId) return null;
+    return claims.find((c) => c.id === defendingClaimId) ?? null;
+  }, [claims, defendingClaimId]);
+
   const activeClashPair = useMemo(() => {
     const clashClaims = claims.filter(
       (c) => c.isClash && c.clashPartnerId && c.status !== "error"
@@ -1029,9 +1062,24 @@ export default function ClashBotSheet({
     activeClashPair?.left.isSubjective || activeClashPair?.right.isSubjective
   );
 
-  const clashLost = pendingResponse && escalationLevel >= 2;
+  const activeChallengeMode = activePendingClaim?.challengeMode ?? "live";
+  const isAsyncChallenge = pendingResponse && activeChallengeMode === "async";
+  const hasTimedDefense = !!activePendingClaim?.responseDeadline;
+  const clashLost = pendingResponse && escalationLevel >= 2 && !hasTimedDefense;
   const clashActive = pendingResponse || clashLost || recoveryMode;
-  const isBlockingClash = pendingResponse && !clashLost;
+  const isBlockingClash = pendingResponse && !clashLost && !isAsyncChallenge;
+  const isDefenseMode = !!activeDefendingClaim?.pendingResponse;
+  const defenseClaim = activeDefendingClaim?.pendingResponse
+    ? activeDefendingClaim
+    : activePendingClaim;
+  const defenseChallengerName =
+    defenseClaim?.challengedBy?.userName ?? (defenseClaim ? "Alex" : null);
+  const defenseTimeLeft = defenseClaim?.responseDeadline
+    ? formatChallengeTimeLeft(
+        defenseClaim.responseDeadline - now,
+        defenseClaim.challengeMode ?? "live"
+      )
+    : null;
 
   useEffect(() => {
     if (clashLost) {
@@ -1187,8 +1235,21 @@ export default function ClashBotSheet({
   useEffect(() => {
     if (!pendingResponse) {
       streakHandledRef.current = false;
+      setDefendingClaimId(null);
     }
   }, [pendingResponse]);
+
+  useEffect(() => {
+    if (!defendingClaimId) return;
+
+    const stillPending = claims.some(
+      (claim) => claim.id === defendingClaimId && claim.pendingResponse
+    );
+
+    if (!stillPending) {
+      setDefendingClaimId(null);
+    }
+  }, [claims, defendingClaimId]);
 
   // Reset toast guard when pendingResponse clears; escalate to level 1 on entry
   useEffect(() => {
@@ -1205,12 +1266,13 @@ export default function ClashBotSheet({
     }
   }, [pendingResponse]);
 
-  // Escalate to level 2 when user tries to type a new claim while pending
+  // Escalate opinion clashes when users try to dodge; timed factual defenses
+  // stay governed by responseDeadline.
   useEffect(() => {
-    if (pendingResponse && draft.trim().length > 0) {
+    if (pendingResponse && !hasTimedDefense && draft.trim().length > 0) {
       setEscalationLevel(2);
     }
-  }, [draft, pendingResponse]);
+  }, [draft, pendingResponse, hasTimedDefense]);
 
   // Clean up toast timer on unmount
   useEffect(() => {
@@ -1326,11 +1388,21 @@ export default function ClashBotSheet({
 
     onPendingResolved?.();
 
-    if (mode === "dashboard" && onDashboardSubmit) {
-      onDashboardSubmit(text);
-      setDraft("");
-      Keyboard.dismiss();
-      return;
+    if (mode === "dashboard") {
+      if (isDefenseMode && defendingClaimId && onDefendSubmit) {
+        onDefendSubmit(defendingClaimId, text);
+        setDraft("");
+        setDefendingClaimId(null);
+        Keyboard.dismiss();
+        return;
+      }
+      if (onDashboardSubmit) {
+        onDashboardSubmit(text);
+        setDraft("");
+        setDefendingClaimId(null);
+        Keyboard.dismiss();
+        return;
+      }
     }
 
     if (mode === "dashboard") {
@@ -1339,6 +1411,7 @@ export default function ClashBotSheet({
 
     onSubmitClaim(text);
     setDraft("");
+    setDefendingClaimId(null);
     Keyboard.dismiss();
   }
 
@@ -1354,7 +1427,9 @@ export default function ClashBotSheet({
     const text = claim.text.trim();
     if (!text) return;
 
-    setDashboardVerifyTarget(text);
+    setDefendingClaimId(claim.id);
+    setDraft(text);
+    setDashboardVerifyTarget("");
     onDefendClaim?.(text);
     setTimeout(() => inputRef.current?.focus(), 0);
   }
@@ -1426,15 +1501,27 @@ export default function ClashBotSheet({
     const heroTextStyle = cardTone
       ? getVerdictTextStyleByTone(cardTone, isOpinion)
       : (isOpinion ? styles.verdictHitNeutral : getVerdictHitTone(verdictHit));
-    const displayStatusLabel = isOpinion ? "Opinion" : statusBadge.label;
+    const displayStatusLabel = claim.pendingResponse
+      ? "Under Challenge"
+      : isOpinion ? "Opinion" : statusBadge.label;
     const displayHelperText = isOpinion ? null : helperText;
-    const secondsLeft =
+    const challengeMode = claim.challengeMode ?? "live";
+    const remainingChallengeMs =
       claim.pendingResponse && claim.responseDeadline
-        ? Math.max(1, Math.ceil((claim.responseDeadline - now) / 1000))
+        ? claim.responseDeadline - now
         : 0;
+    const challengeTimeLeft = formatChallengeTimeLeft(
+      remainingChallengeMs,
+      challengeMode
+    );
     const showResponseCountdown =
       claim.pendingResponse && !!claim.responseDeadline && claim.responseDeadline > now;
-    const showChallengeButton = !claim.pendingResponse && !claim.challengedBy;
+    const showChallengeButton = !claim.pendingResponse && !claim.challengedBy && !claim.isSubjective;
+    const challengerName =
+      claim.challengedBy?.userName ?? (claim.pendingResponse ? "Alex" : null);
+    const challengerLine = challengerName
+      ? `${challengerName} challenged this claim`
+      : null;
 
     return (
       <View
@@ -1473,25 +1560,25 @@ export default function ClashBotSheet({
           <Text style={styles.claimHeroText}>{claim.text}</Text>
         </View>
 
+        {!!challengerLine && (
+          <Text style={styles.challengedByText}>
+            {challengerLine}
+          </Text>
+        )}
+
         {showResponseCountdown && (
           <>
             <Text style={styles.responseCountdownText}>
-              ⏳ Respond in {secondsLeft}s
+              Defend your claim. {challengeTimeLeft} left.
             </Text>
 
             <Pressable
               onPress={() => handleDefendClaim(claim)}
               style={styles.defendClaimButton}
             >
-              <Text style={styles.defendClaimButtonText}>DEFEND CLAIM</Text>
+              <Text style={styles.defendClaimButtonText}>Defend your claim</Text>
             </Pressable>
           </>
-        )}
-
-        {!!claim.challengedBy && (
-          <Text style={styles.challengedByText}>
-            ⚔️ Challenged by @{claim.challengedBy.userName}
-          </Text>
         )}
 
         {showChallengeButton && (
@@ -1859,8 +1946,53 @@ export default function ClashBotSheet({
           {pendingResponse && (
             <View style={[styles.pendingResponseBadge, escalationLevel >= 2 && styles.pendingResponseBadgeEscalated]}>
               <Text style={[styles.pendingResponseBadgeText, escalationLevel >= 2 && styles.pendingResponseBadgeTextEscalated]}>
-                {clashLost ? "❌ You lost this clash" : "⚠️ You haven't responded"}
+                {clashLost
+                  ? "You lost this clash"
+                  : activePendingClaim?.challengedBy?.userName
+                    ? `${activePendingClaim.challengedBy.userName} challenged this claim`
+                    : "Defend your claim"}
               </Text>
+            </View>
+          )}
+
+          {!!defenseClaim && pendingResponse && (
+            <View
+              style={[
+                styles.defenseFocusCard,
+                isDefenseMode && styles.defenseFocusCardActive,
+              ]}
+            >
+              <View style={styles.defenseFocusTopRow}>
+                <Text style={styles.defenseFocusLabel}>
+                  {isDefenseMode ? "DEFENDING CLAIM" : "UNDER CHALLENGE"}
+                </Text>
+                {!!defenseTimeLeft && (
+                  <Text style={styles.defenseFocusCountdown}>
+                    {defenseTimeLeft} left
+                  </Text>
+                )}
+              </View>
+
+              {!!defenseChallengerName && (
+                <Text style={styles.defenseFocusLine}>
+                  {defenseChallengerName} challenged this claim
+                </Text>
+              )}
+
+              <Text style={styles.defenseFocusClaim} numberOfLines={3}>
+                {defenseClaim.text}
+              </Text>
+
+              {!isDefenseMode && (
+                <Pressable
+                  onPress={() => handleDefendClaim(defenseClaim)}
+                  style={styles.defenseFocusButton}
+                >
+                  <Text style={styles.defenseFocusButtonText}>
+                    Defend your claim
+                  </Text>
+                </Pressable>
+              )}
             </View>
           )}
 
@@ -1870,13 +2002,14 @@ export default function ClashBotSheet({
                 ref={inputRef}
                 value={draft}
                 onChangeText={setDraft}
-                placeholder="Type a claim..."
+                placeholder={isDefenseMode ? "Write your defense..." : "Type a claim..."}
                 placeholderTextColor="rgba(15, 23, 42, 0.45)"
                 editable={!clashLost}
                 style={[
                   styles.input,
                   Platform.OS === "android" && { includeFontPadding: false },
-                  pendingResponse && styles.inputDimmed,
+                  pendingResponse && !isDefenseMode && styles.inputDimmed,
+                  isDefenseMode && styles.inputDefending,
                   clashLost && styles.inputLocked,
                 ]}
                 onSubmitEditing={handleSubmit}
@@ -1885,8 +2018,21 @@ export default function ClashBotSheet({
                 onBlur={() => console.log("[ClashBot] input blurred")}
               />
 
-              <Pressable onPress={handleSubmit} style={styles.verifyButton}>
-                <Text style={styles.verifyButtonText}>Verify</Text>
+              <Pressable
+                onPress={handleSubmit}
+                style={[
+                  styles.verifyButton,
+                  isDefenseMode && styles.verifyButtonDefending,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.verifyButtonText,
+                    isDefenseMode && styles.verifyButtonTextDefending,
+                  ]}
+                >
+                  {isDefenseMode ? "Defend" : "Verify"}
+                </Text>
               </Pressable>
             </View>
           ) : null}
@@ -1894,7 +2040,9 @@ export default function ClashBotSheet({
           {pendingResponse && draft.trim().length > 0 && (
             <View style={styles.escapeWarning}>
               <Text style={styles.escapeWarningText}>
-                ⚠️ Finish your current clash first
+                {hasTimedDefense
+                  ? "Defend your claim before the clock hits zero"
+                  : "Finish your current clash first"}
               </Text>
             </View>
           )}
@@ -1946,7 +2094,7 @@ export default function ClashBotSheet({
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}
               onScroll={(e) => {
-                if (pendingResponse && e.nativeEvent.contentOffset.y > 80) {
+                if (pendingResponse && !hasTimedDefense && e.nativeEvent.contentOffset.y > 80) {
                   showPressureToast();
                   setEscalationLevel(2);
                 }
@@ -2071,10 +2219,16 @@ export default function ClashBotSheet({
                     </Pressable>
                   ) : pendingResponse ? (
                     <Pressable
-                      onPress={() => inputRef.current?.focus()}
+                      onPress={() => {
+                        if (activePendingClaim) {
+                          handleDefendClaim(activePendingClaim);
+                          return;
+                        }
+                        inputRef.current?.focus();
+                      }}
                       style={styles.respondCtaButton}
                     >
-                      <Text style={styles.respondCtaText}>Defend Your Claim</Text>
+                      <Text style={styles.respondCtaText}>Defend your claim</Text>
                     </Pressable>
                   ) : null}
                 </View>
@@ -2363,6 +2517,14 @@ const styles = StyleSheet.create({
     color: "#0b1723",
   },
 
+  inputDefending: {
+    opacity: 1,
+    backgroundColor: "rgba(254, 226, 226, 0.92)",
+    borderWidth: 1.5,
+    borderColor: "rgba(220, 38, 38, 0.54)",
+    color: "#7f1d1d",
+  },
+
   verifyButton: {
     backgroundColor: "#2fd3f5",
     borderRadius: 22,
@@ -2372,10 +2534,18 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
 
+  verifyButtonDefending: {
+    backgroundColor: "#dc2626",
+  },
+
   verifyButtonText: {
     fontSize: 18,
     fontWeight: "900",
     color: "#03131d",
+  },
+
+  verifyButtonTextDefending: {
+    color: "#ffffff",
   },
 
   scroll: {
@@ -2604,16 +2774,18 @@ const styles = StyleSheet.create({
   },
 
   defendClaimButtonText: {
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: "900",
     color: "#991b1b",
   },
 
   challengedByText: {
-    fontSize: 12,
+    fontSize: 14,
+    lineHeight: 19,
     fontWeight: "900",
-    color: "#7f1d1d",
-    marginBottom: 8,
+    color: "#991b1b",
+    marginTop: 12,
+    marginBottom: 6,
   },
 
   challengeClaimButton: {
@@ -3234,6 +3406,70 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "900",
     color: "#78350f",
+  },
+
+  defenseFocusCard: {
+    backgroundColor: "rgba(254, 242, 242, 0.96)",
+    borderRadius: 18,
+    borderWidth: 1.5,
+    borderColor: "rgba(220, 38, 38, 0.42)",
+    padding: 14,
+    marginBottom: 14,
+    gap: 8,
+  },
+
+  defenseFocusCardActive: {
+    backgroundColor: "rgba(254, 226, 226, 0.98)",
+    borderColor: "rgba(220, 38, 38, 0.66)",
+  },
+
+  defenseFocusTopRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 10,
+  },
+
+  defenseFocusLabel: {
+    fontSize: 13,
+    fontWeight: "900",
+    color: "#991b1b",
+    letterSpacing: 0.4,
+  },
+
+  defenseFocusCountdown: {
+    fontSize: 13,
+    fontWeight: "900",
+    color: "#dc2626",
+  },
+
+  defenseFocusLine: {
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: "900",
+    color: "#7f1d1d",
+  },
+
+  defenseFocusClaim: {
+    fontSize: 15,
+    lineHeight: 21,
+    fontWeight: "800",
+    color: "#0f172a",
+  },
+
+  defenseFocusButton: {
+    alignSelf: "flex-start",
+    backgroundColor: "#dc2626",
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginTop: 2,
+  },
+
+  defenseFocusButtonText: {
+    fontSize: 13,
+    fontWeight: "900",
+    color: "#ffffff",
   },
 
   respondCtaButton: {

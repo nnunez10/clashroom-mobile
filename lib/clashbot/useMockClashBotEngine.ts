@@ -45,6 +45,8 @@ type ClaimStatus =
   | "error"
   | "disputed";
 
+type ChallengeMode = "live" | "async";
+
 type ClaimEventType =
   | "claim_detected"
   | "claim_queued"
@@ -135,6 +137,7 @@ type EngineClaim = Omit<Claim, "verification"> & {
   isSubjective?: boolean;
   pendingResponse?: boolean;
   responseDeadline?: number;
+  challengeMode?: ChallengeMode;
   authorId?: string;
   authorName?: string;
   challengedBy?: {
@@ -151,7 +154,19 @@ type FamilyRegistryEntry = {
   seedText: string;
 };
 
-const RESPONSE_WINDOW_MS = 15_000;
+const LIVE_RESPONSE_WINDOW_MS = 90_000;
+const ASYNC_RESPONSE_WINDOW_MS = 4 * 60 * 60 * 1000;
+
+const MOCK_CHALLENGERS = [
+  { userId: "mock_challenger_rivera", userName: "Rivera" },
+  { userId: "mock_challenger_okonkwo", userName: "Okonkwo" },
+  { userId: "mock_challenger_alex", userName: "Alex" },
+] as const;
+
+function pickMockChallenger(claimId: string) {
+  const idx = claimId.charCodeAt(claimId.length - 1) % MOCK_CHALLENGERS.length;
+  return MOCK_CHALLENGERS[idx];
+}
 
 function appendClaimEvent(
   claim: EngineClaim,
@@ -480,7 +495,17 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
       // updater stays pure. claimsRef.current is a synchronous snapshot of the
       // current claims state — safe to read in a single-threaded event handler.
       const seenAt = seenClaimsRef.current.get(fp);
+      const pendingExactDefense = claimsRef.current.find(
+        (existing) =>
+          existing.pendingResponse &&
+          existing.claimDna?.fingerprint === fp
+      );
       if (seenAt !== undefined && ts - seenAt < SEEN_CLAIM_COOLDOWN_MS) {
+        if (pendingExactDefense?.familyId) {
+          setClaims((prev) =>
+            clearPendingDefenseForFamily(prev, pendingExactDefense.familyId)
+          );
+        }
         console.log(`[submitDirectClaim] blocked: seenClaim cooldown (elapsed ${ts - seenAt}ms < ${SEEN_CLAIM_COOLDOWN_MS}ms) fp="${fp}"`);
         return;
       }
@@ -709,6 +734,7 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
     const target = claimsRef.current.find((claim) => claim.id === claimId);
 
     if (!target) return false;
+    if (target.isSubjective) return false;
     if (target.pendingResponse || target.challengedBy) return false;
     if (!canChallengeClaim(target, challenger)) return false;
 
@@ -719,12 +745,13 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
         const challengedClaim = issueChallengeOnClaim(
           claim,
           challenger,
-          RESPONSE_WINDOW_MS,
+          LIVE_RESPONSE_WINDOW_MS,
           now
         );
 
         return {
           ...challengedClaim,
+          challengeMode: "live",
           events: appendClaimEvent(
             challengedClaim,
             "challenge_issued",
@@ -741,6 +768,64 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
 
     setLastClaimAt(now);
     return true;
+  }, []);
+
+  const defendClaim = useCallback((challengedClaimId: string, defenseText: string) => {
+    const target = claimsRef.current.find((c) => c.id === challengedClaimId);
+    if (!target) return;
+
+    const { raw, normalized } = normalizeClaimInput(String(defenseText || ""));
+    if (!raw) return;
+
+    const ts = Date.now();
+    const claimId = makeId("claim", `${normalized}_${ts}`);
+    const dna = getClaimDna(normalized);
+    const forcedFamilyId = target.familyId ?? target.claimDna?.familyId ?? challengedClaimId;
+
+    let seededDefense: EngineClaim = {
+      id: claimId,
+      text: raw,
+      ts,
+      normalizedText: normalized !== raw ? normalized : undefined,
+      createdAt: ts,
+      status: "queued",
+      fingerprint: dna.fingerprint,
+      claimDna: { ...dna, familyId: forcedFamilyId },
+      familyId: forcedFamilyId,
+      derivedFromClaimId: challengedClaimId,
+      evidence: [],
+      events: [],
+      timeline: { queuedAt: ts },
+      authorId: "local_user",
+    };
+
+    seededDefense = {
+      ...seededDefense,
+      events: appendClaimEvent(
+        seededDefense,
+        "claim_detected",
+        ts,
+        "Defense submitted against challenge.",
+        { text: raw, familyId: forcedFamilyId, derivedFromClaimId: challengedClaimId }
+      ),
+    };
+    seededDefense = {
+      ...seededDefense,
+      events: appendClaimEvent(
+        seededDefense,
+        "claim_queued",
+        ts,
+        "Defense claim queued for verification.",
+        { text: raw, familyId: forcedFamilyId, derivedFromClaimId: challengedClaimId }
+      ),
+    };
+
+    seenClaimsRef.current.set(dna.fingerprint, ts);
+    setTranscript((prev) => [raw, ...prev].slice(0, 10));
+    setClaims((prev) =>
+      [seededDefense, ...clearPendingDefenseForFamily(prev, forcedFamilyId)].slice(0, 20)
+    );
+    setLastClaimAt(ts);
   }, []);
 
   useEffect(() => {
@@ -766,6 +851,7 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
             claim.pendingResponse &&
             claim.responseDeadline &&
             now > claim.responseDeadline &&
+            !claim.isSubjective &&
             !autoLossAppliedRef.current.has(claim.id)
         )
         .map((claim) => claim.id);
@@ -789,7 +875,6 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
           return {
             ...claim,
             pendingResponse: false,
-            responseDeadline: undefined,
             events: appendClaimEvent(
               claim,
               "auto_loss_no_response",
@@ -870,8 +955,15 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
                   completedAt,
                   pendingResponse,
                   responseDeadline: pendingResponse
-                    ? completedAt + RESPONSE_WINDOW_MS
+                    ? completedAt + ASYNC_RESPONSE_WINDOW_MS
                     : undefined,
+                  challengeMode: pendingResponse ? "async" : c.challengeMode,
+                  challengedBy: pendingResponse
+                    ? {
+                        ...pickMockChallenger(c.id),
+                        at: completedAt,
+                      }
+                    : c.challengedBy,
                   events: appendClaimEvent(
                     c,
                     "claim_override_matched",
@@ -1007,8 +1099,15 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
                   completedAt,
                   pendingResponse,
                   responseDeadline: pendingResponse
-                    ? completedAt + RESPONSE_WINDOW_MS
+                    ? completedAt + ASYNC_RESPONSE_WINDOW_MS
                     : undefined,
+                  challengeMode: pendingResponse ? "async" : c.challengeMode,
+                  challengedBy: pendingResponse
+                    ? {
+                        ...pickMockChallenger(c.id),
+                        at: completedAt,
+                      }
+                    : c.challengedBy,
                   events: appendClaimEvent(
                     c,
                     "claim_contradicted",
@@ -1185,5 +1284,6 @@ export function useMockClashBotEngine(options: EngineOptions = {}) {
     pushTranscriptLine,
     submitDirectClaim,
     challengeClaim,
+    defendClaim,
   };
 }

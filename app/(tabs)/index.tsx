@@ -120,22 +120,20 @@ export default function HomeScreen() {
     bubbleIsChecking,
     submitDirectClaim,
     challengeClaim,
+    defendClaim,
   } = useMockClashBotEngine();
 
-  // Detect when a user-submitted claim becomes a clash
+  // Detect when a user-submitted claim becomes a timed defense.
   useEffect(() => {
-    if (pendingResponse) return;
-    // Only count claims that the engine has flagged as needing a timed defense
-    // (pendingResponse on the claim itself). Subjective clash pairs are isClash:true
-    // but have no pendingResponse — they must not lock the close button.
-    const hasClash = claims.some(
-      (c: any) => c.isClash && c.pendingResponse && userSubmittedTextsRef.current.has(c.text)
+    const hasPendingChallenge = claims.some(
+      (c: any) =>
+        c.pendingResponse &&
+        (userSubmittedTextsRef.current.has(c.text) ||
+          c.challengedBy ||
+          c.verification?.displayVerdict?.clashMechanic === "factual_clash")
     );
-    const hasManualChallenge = claims.some(
-      (c: any) => c.pendingResponse && c.challengedBy
-    );
-    if (hasClash || hasManualChallenge) setPendingResponse(true);
-  }, [claims, pendingResponse]);
+    setPendingResponse(hasPendingChallenge);
+  }, [claims]);
 
   function handleDirectSubmit(text: string) {
     userSubmittedTextsRef.current.add(text.trim());
@@ -145,7 +143,7 @@ export default function HomeScreen() {
   function handlePendingResolved() {
     // Remove responded claim texts so they don't re-trigger
     claims
-      .filter((c: any) => c.isClash && userSubmittedTextsRef.current.has(c.text))
+      .filter((c: any) => c.pendingResponse && userSubmittedTextsRef.current.has(c.text))
       .forEach((c: any) => userSubmittedTextsRef.current.delete(c.text));
     setPendingResponse(false);
   }
@@ -623,7 +621,8 @@ export default function HomeScreen() {
           pendingResponse={pendingResponse}
           onPendingResolved={handlePendingResolved}
           onStartPending={() => setPendingResponse(true)}
-          onDefendClaim={openQuickVerify}
+          onDefendClaim={openDashboard}
+          onDefendSubmit={(claimId, text) => defendClaim(claimId, text)}
           onChallengeClaim={handleChallengeClaim}
         />
 
