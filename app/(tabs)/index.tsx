@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Keyboard,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -110,6 +111,7 @@ export default function HomeScreen() {
   const speechActiveRef = useRef(false);
   const speechSessionRef = useRef(0);
   const speechEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const quickInputRef = useRef<TextInput | null>(null);
   const lastSubmitAtRef = useRef(0);
   const isListeningShared = useSharedValue(false);
 
@@ -402,6 +404,7 @@ export default function HomeScreen() {
   }
 
   function openQuickVerify(seedText?: string) {
+    Keyboard.dismiss();
     if (seedText) {
       setPendingQuickClaim(seedText);
     }
@@ -421,6 +424,7 @@ export default function HomeScreen() {
     setPendingQuickClaim(t);
     handleDirectSubmit(t);
     setQuickDraft("");
+    quickInputRef.current?.blur();
     openQuickVerify(t);
   }
 
@@ -457,6 +461,7 @@ export default function HomeScreen() {
 
           <View style={styles.quickRow}>
             <TextInput
+              ref={quickInputRef}
               value={quickDraft}
               onChangeText={setQuickDraft}
               placeholder='Quick Verify: "Gas prices are the highest ever"'

@@ -1393,6 +1393,7 @@ export default function ClashBotSheet({
         onDefendSubmit(defendingClaimId, text);
         setDraft("");
         setDefendingClaimId(null);
+        inputRef.current?.blur();
         Keyboard.dismiss();
         return;
       }
@@ -1400,6 +1401,7 @@ export default function ClashBotSheet({
         onDashboardSubmit(text);
         setDraft("");
         setDefendingClaimId(null);
+        inputRef.current?.blur();
         Keyboard.dismiss();
         return;
       }
@@ -1412,6 +1414,7 @@ export default function ClashBotSheet({
     onSubmitClaim(text);
     setDraft("");
     setDefendingClaimId(null);
+    inputRef.current?.blur();
     Keyboard.dismiss();
   }
 
@@ -1955,7 +1958,7 @@ export default function ClashBotSheet({
             </View>
           )}
 
-          {!!defenseClaim && pendingResponse && (
+          {!!defenseClaim && pendingResponse && mode === "dashboard" && (
             <View
               style={[
                 styles.defenseFocusCard,
@@ -2080,6 +2083,46 @@ export default function ClashBotSheet({
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}
             >
+              {!!defenseClaim && pendingResponse && (
+                <View
+                  style={[
+                    styles.defenseFocusCard,
+                    isDefenseMode && styles.defenseFocusCardActive,
+                  ]}
+                >
+                  <View style={styles.defenseFocusTopRow}>
+                    <Text style={styles.defenseFocusLabel}>
+                      {isDefenseMode ? "DEFENDING CLAIM" : "UNDER CHALLENGE"}
+                    </Text>
+                    {!!defenseTimeLeft && (
+                      <Text style={styles.defenseFocusCountdown}>
+                        {defenseTimeLeft} left
+                      </Text>
+                    )}
+                  </View>
+
+                  {!!defenseChallengerName && (
+                    <Text style={styles.defenseFocusLine}>
+                      {defenseChallengerName} challenged this claim
+                    </Text>
+                  )}
+
+                  <Text style={styles.defenseFocusClaim} numberOfLines={3}>
+                    {defenseClaim.text}
+                  </Text>
+
+                  {!isDefenseMode && (
+                    <Pressable
+                      onPress={() => handleDefendClaim(defenseClaim)}
+                      style={styles.defenseFocusButton}
+                    >
+                      <Text style={styles.defenseFocusButtonText}>
+                        Defend your claim
+                      </Text>
+                    </Pressable>
+                  )}
+                </View>
+              )}
               <QuickVerifyStatus
                 claims={sortedClaims}
                 quickVerifyTarget={quickVerifyTarget}
@@ -2394,7 +2437,7 @@ const styles = StyleSheet.create({
   },
 
   quickVerifyScrollContent: {
-    paddingBottom: 12,
+    paddingBottom: 80,
   },
 
   quickStatusCard: {
