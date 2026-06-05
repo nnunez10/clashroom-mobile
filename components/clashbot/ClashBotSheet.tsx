@@ -751,9 +751,31 @@ function QuickVerifyStatus({
   const qvHeroTextStyle = qvTone
     ? getVerdictTextStyleByTone(qvTone, isOpinionLatest)
     : undefined;
+  const qvStatusLabel = latest.pendingResponse
+    ? "Under Challenge"
+    : isOpinionLatest
+      ? "Opinion"
+      : statusBadge.label;
 
   return (
     <View style={styles.quickStatusCard}>
+      {!compact && (
+        <View style={styles.quickClaimCardHeader}>
+          <View style={styles.quickClaimCardTitleWrap}>
+            <Text style={styles.quickClaimCardEyebrow}>
+              Generated ClaimCard
+            </Text>
+            <Text style={styles.quickClaimCardSub}>
+              Claim + receipts from ClashRoom
+            </Text>
+          </View>
+
+          <Text style={styles.quickClaimCardStatus}>
+            {qvStatusLabel}
+          </Text>
+        </View>
+      )}
+
       <View style={[styles.verdictHero, qvVerdictBg]}>
         <LinearGradient
           colors={["rgba(255,255,255,0.08)", "rgba(255,255,255,0.00)"]}
@@ -787,6 +809,22 @@ function QuickVerifyStatus({
         </View>
       </View>
 
+      {!compact && (
+        <View style={styles.quickClaimCardActionRow}>
+          <View style={styles.quickClaimCardAction}>
+            <Text style={styles.quickClaimCardActionText}>Save soon</Text>
+          </View>
+          <View style={styles.quickClaimCardAction}>
+            <Text style={styles.quickClaimCardActionText}>Share soon</Text>
+          </View>
+          <View style={styles.quickClaimCardAction}>
+            <Text style={styles.quickClaimCardActionText}>
+              Challenge in dashboard
+            </Text>
+          </View>
+        </View>
+      )}
+
       {isActive && (
         <Text style={styles.quickStatusHint}>
           {isChecking ? CHECKING_PHRASES[phraseIdx] : "Queued for verification…"}
@@ -795,6 +833,13 @@ function QuickVerifyStatus({
 
       {!!verification && (
         <View style={styles.quickEvidenceWrap}>
+          {!compact && (
+            <View style={styles.quickEvidenceHeader}>
+              <Text style={styles.quickEvidenceLabel}>Evidence receipts</Text>
+              <Text style={styles.quickEvidenceType}>{sourceType}</Text>
+            </View>
+          )}
+
           {(!!topMatch?.publisher || !!evidenceDate) && (
             <Text style={styles.publisherText} numberOfLines={1}>
               {[topMatch?.publisher, evidenceDate].filter(Boolean).join(" · ")}
@@ -2453,6 +2498,48 @@ const styles = StyleSheet.create({
     color: "rgba(11, 23, 35, 0.70)",
   },
 
+  quickClaimCardHeader: {
+    paddingHorizontal: 14,
+    paddingTop: 14,
+    paddingBottom: 10,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 10,
+    backgroundColor: "rgba(255,255,255,0.72)",
+  },
+
+  quickClaimCardTitleWrap: {
+    flex: 1,
+  },
+
+  quickClaimCardEyebrow: {
+    fontSize: 12,
+    fontWeight: "900",
+    color: "#0d3b4a",
+    textTransform: "uppercase",
+  },
+
+  quickClaimCardSub: {
+    marginTop: 3,
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: "700",
+    color: "rgba(15, 23, 42, 0.58)",
+  },
+
+  quickClaimCardStatus: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: "rgba(34,211,238,0.14)",
+    color: "#0d3b4a",
+    fontSize: 10,
+    fontWeight: "900",
+    textTransform: "uppercase",
+    overflow: "hidden",
+  },
+
   quickStatusExplanation: {
     fontSize: 15,
     lineHeight: 21,
@@ -2472,9 +2559,55 @@ const styles = StyleSheet.create({
     color: "rgba(11, 23, 35, 0.55)",
   },
 
+  quickClaimCardActionRow: {
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    backgroundColor: "rgba(255,255,255,0.72)",
+  },
+
+  quickClaimCardAction: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: "rgba(15, 23, 42, 0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(15, 23, 42, 0.08)",
+  },
+
+  quickClaimCardActionText: {
+    fontSize: 11,
+    fontWeight: "900",
+    color: "rgba(15, 23, 42, 0.46)",
+  },
+
   quickEvidenceWrap: {
     padding: 14,
     gap: 8,
+  },
+
+  quickEvidenceHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+
+  quickEvidenceLabel: {
+    fontSize: 12,
+    fontWeight: "900",
+    color: "#0d3b4a",
+    textTransform: "uppercase",
+  },
+
+  quickEvidenceType: {
+    flexShrink: 1,
+    textAlign: "right",
+    fontSize: 11,
+    fontWeight: "800",
+    color: "rgba(15, 23, 42, 0.52)",
   },
 
   sheetDashboard: {
