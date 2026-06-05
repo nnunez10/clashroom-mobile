@@ -459,33 +459,55 @@ export default function HomeScreen() {
             receipts, not vibes.
           </Text>
 
-          <View style={styles.quickRow}>
-            <TextInput
-              ref={quickInputRef}
-              value={quickDraft}
-              onChangeText={setQuickDraft}
-              placeholder='Quick Verify: "Gas prices are the highest ever"'
-              placeholderTextColor="rgba(255,255,255,0.40)"
-              style={styles.quickInput}
-              returnKeyType="done"
-              onSubmitEditing={submitQuickVerify}
-            />
+          <View style={styles.clashBubbleShell}>
+            <View style={styles.clashBubbleHead}>
+              <View>
+                <Text style={styles.clashBubbleKicker}>ClashBubble Simulator</Text>
+                <Text style={styles.clashBubbleTitle}>Verify Anything</Text>
+              </View>
+              <Text style={styles.clashBubbleStatus}>TEXT READY</Text>
+            </View>
 
-            <GestureDetector gesture={micGesture}>
-              <Animated.View
-                style={[styles.micBtn, micBtnAnimStyle]}
-                accessibilityRole="button"
-                accessibilityLabel="Press and hold to speak a claim"
-              >
-                <Animated.Text style={[styles.micBtnText, micBtnTextAnimStyle]}>
-                  {isListeningForClaim ? "Release" : "Mic"}
-                </Animated.Text>
-              </Animated.View>
-            </GestureDetector>
+            <View style={styles.verifyModeRow}>
+              <View style={[styles.verifyModeChip, styles.verifyModeChipActive]}>
+                <Text style={[styles.verifyModeText, styles.verifyModeTextActive]}>Text</Text>
+              </View>
+              <View style={[styles.verifyModeChip, styles.verifyModeChipDisabled]}>
+                <Text style={styles.verifyModeText}>Link soon</Text>
+              </View>
+              <View style={[styles.verifyModeChip, styles.verifyModeChipDisabled]}>
+                <Text style={styles.verifyModeText}>Screenshot soon</Text>
+              </View>
+            </View>
 
-            <Pressable onPress={submitQuickVerify} style={styles.verifyBtn} hitSlop={10}>
-              <Text style={styles.verifyBtnText}>Verify</Text>
-            </Pressable>
+            <View style={styles.quickRow}>
+              <TextInput
+                ref={quickInputRef}
+                value={quickDraft}
+                onChangeText={setQuickDraft}
+                placeholder='Drop a claim: "Gas prices are the highest ever"'
+                placeholderTextColor="rgba(255,255,255,0.40)"
+                style={styles.quickInput}
+                returnKeyType="done"
+                onSubmitEditing={submitQuickVerify}
+              />
+
+              <GestureDetector gesture={micGesture}>
+                <Animated.View
+                  style={[styles.micBtn, micBtnAnimStyle]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Press and hold to speak a claim"
+                >
+                  <Animated.Text style={[styles.micBtnText, micBtnTextAnimStyle]}>
+                    {isListeningForClaim ? "Release" : "Mic"}
+                  </Animated.Text>
+                </Animated.View>
+              </GestureDetector>
+
+              <Pressable onPress={submitQuickVerify} style={styles.verifyBtn} hitSlop={10}>
+                <Text style={styles.verifyBtnText}>Verify</Text>
+              </Pressable>
+            </View>
           </View>
 
           <Text style={styles.voiceHintLine}>{voiceHint}</Text>
@@ -759,7 +781,69 @@ const styles = StyleSheet.create({
   heroTitle: { color: "white", fontSize: 40, fontWeight: "900", marginTop: 2 },
   heroSub: { color: "rgba(255,255,255,0.78)", marginTop: 10, lineHeight: 20 },
 
-  quickRow: { marginTop: 14, flexDirection: "row", gap: 10, alignItems: "center" },
+  clashBubbleShell: {
+    marginTop: 14,
+    borderRadius: 18,
+    padding: 12,
+    backgroundColor: "rgba(0,0,0,0.20)",
+    borderWidth: 1,
+    borderColor: "rgba(36,230,184,0.28)",
+  },
+  clashBubbleHead: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  clashBubbleKicker: {
+    color: "rgba(36,230,184,0.92)",
+    fontSize: 11,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  clashBubbleTitle: {
+    color: "white",
+    fontSize: 20,
+    fontWeight: "900",
+    marginTop: 3,
+  },
+  clashBubbleStatus: {
+    color: "#06141A",
+    backgroundColor: "rgba(36,230,184,0.92)",
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    fontSize: 10,
+    fontWeight: "900",
+  },
+  verifyModeRow: {
+    marginTop: 12,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  verifyModeChip: {
+    borderRadius: 999,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderWidth: 1,
+  },
+  verifyModeChipActive: {
+    backgroundColor: "rgba(34,211,238,0.16)",
+    borderColor: "rgba(34,211,238,0.44)",
+  },
+  verifyModeChipDisabled: {
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  verifyModeText: {
+    color: "rgba(255,255,255,0.50)",
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  verifyModeTextActive: { color: "rgba(34,211,238,0.96)" },
+
+  quickRow: { marginTop: 12, flexDirection: "row", gap: 10, alignItems: "center" },
   quickInput: {
     flex: 1,
     height: 48,
