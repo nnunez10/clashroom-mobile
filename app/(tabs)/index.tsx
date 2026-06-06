@@ -462,10 +462,13 @@ export default function HomeScreen() {
           <View style={styles.clashBubbleShell}>
             <View style={styles.clashBubbleHead}>
               <View>
-                <Text style={styles.clashBubbleKicker}>ClashBubble Simulator</Text>
+                <Text style={styles.clashBubbleKicker}>ClashBubble</Text>
                 <Text style={styles.clashBubbleTitle}>Verify Anything</Text>
+                <Text style={styles.clashBubbleSub}>
+                  Drop a claim. Get a ClaimCard.
+                </Text>
               </View>
-              <Text style={styles.clashBubbleStatus}>TEXT READY</Text>
+              <Text style={styles.clashBubbleStatus}>TEXT LIVE</Text>
             </View>
 
             <View style={styles.verifyModeRow}>
@@ -806,6 +809,13 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: "900",
     marginTop: 3,
+  },
+  clashBubbleSub: {
+    color: "rgba(255,255,255,0.62)",
+    fontSize: 12,
+    fontWeight: "800",
+    lineHeight: 16,
+    marginTop: 4,
   },
   clashBubbleStatus: {
     color: "#06141A",
