@@ -175,6 +175,8 @@ type ClashBotSheetProps = {
   onDefendClaim?: (text: string) => void;
   onDefendSubmit?: (challengedClaimId: string, text: string) => void;
   onChallengeClaim?: (claimId: string) => void;
+  savedClaimIds?: Set<string>;
+  onToggleSavedClaim?: (claimId: string) => void;
 };
 
 function getStatusBadge(
@@ -1002,6 +1004,8 @@ export default function ClashBotSheet({
   onDefendClaim,
   onDefendSubmit,
   onChallengeClaim,
+  savedClaimIds: savedClaimIdsProp,
+  onToggleSavedClaim,
 }: ClashBotSheetProps) {
   const [draft, setDraft] = useState(initialDraft);
   const [closeEnabled, setCloseEnabled] = useState(false);
@@ -1023,7 +1027,7 @@ export default function ClashBotSheet({
     challengeResolved?: boolean;
   } | null>(null);
   const [now, setNow] = useState(Date.now());
-  const [savedClaimIds, setSavedClaimIds] = useState<Set<string>>(() => new Set());
+  const savedClaimIds = savedClaimIdsProp ?? new Set<string>();
   const inputRef = useRef<TextInput | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const momentumTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1503,18 +1507,6 @@ export default function ClashBotSheet({
 
   function handleChallengeClaim(claim: ClaimItem) {
     onChallengeClaim?.(claim.id);
-  }
-
-  function toggleSavedClaim(claimId: string) {
-    setSavedClaimIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(claimId)) {
-        next.delete(claimId);
-      } else {
-        next.add(claimId);
-      }
-      return next;
-    });
   }
 
   function renderClaimCard(claim: ClaimItem, options?: { nested?: boolean }) {
@@ -2203,7 +2195,7 @@ export default function ClashBotSheet({
                 claims={sortedClaims}
                 quickVerifyTarget={quickVerifyTarget}
                 savedClaimIds={savedClaimIds}
-                onToggleSavedClaim={toggleSavedClaim}
+                onToggleSavedClaim={onToggleSavedClaim}
               />
             </ScrollView>
           )}

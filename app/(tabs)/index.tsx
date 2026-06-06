@@ -113,6 +113,19 @@ export default function HomeScreen() {
   const speechEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const quickInputRef = useRef<TextInput | null>(null);
   const lastSubmitAtRef = useRef(0);
+  const [savedClaimIds, setSavedClaimIds] = useState<Set<string>>(() => new Set());
+
+  function toggleSavedClaim(claimId: string) {
+    setSavedClaimIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(claimId)) {
+        next.delete(claimId);
+      } else {
+        next.add(claimId);
+      }
+      return next;
+    });
+  }
   const isListeningShared = useSharedValue(false);
 
   const {
@@ -654,6 +667,8 @@ export default function HomeScreen() {
           onDefendClaim={openDashboard}
           onDefendSubmit={(claimId, text) => defendClaim(claimId, text)}
           onChallengeClaim={handleChallengeClaim}
+          savedClaimIds={savedClaimIds}
+          onToggleSavedClaim={toggleSavedClaim}
         />
 
         {!sheetOpen && (
