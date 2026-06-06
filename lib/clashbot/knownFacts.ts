@@ -61,6 +61,19 @@ export const KNOWN_FACT_OVERRIDES: KnownFactOverride[] = [
     sourceUrl: "https://earthobservatory.nasa.gov/",
   },
   {
+    // Matches: "earth photos are fake", "earth sphere images are fake", etc.
+    // Requires "fake" to be present so "The Earth is roughly spherical" never hits this.
+    id: "earth-sphere-imagery-fake",
+    keywordsAll: ["earth", "fake"],
+    keywordsAny: ["sphere", "spherical", "round", "globe", "photo", "picture", "image"],
+    contradictsClaim: true,
+    label: "Known science",
+    reason:
+      "Images showing the Earth as a sphere are genuine. Satellite photography and independent space agencies worldwide confirm the Earth's roughly spherical shape.",
+    sourceLabel: "NASA Earth science",
+    sourceUrl: "https://earthobservatory.nasa.gov/",
+  },
+  {
     // "the earth is round" → normalized: "the earth is round"
     // Phrase match prevents matching "the flat earth is not round".
     id: "earth-round",
