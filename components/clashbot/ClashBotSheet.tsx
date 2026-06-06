@@ -819,7 +819,7 @@ function QuickVerifyStatus({
           </View>
           <View style={styles.quickClaimCardAction}>
             <Text style={styles.quickClaimCardActionText}>
-              Challenge in dashboard
+              Challenge soon
             </Text>
           </View>
         </View>
