@@ -652,10 +652,14 @@ function QuickVerifyStatus({
   claims,
   compact,
   quickVerifyTarget,
+  savedClaimIds,
+  onToggleSavedClaim,
 }: {
   claims: ClaimItem[];
   compact?: boolean;
   quickVerifyTarget?: string;
+  savedClaimIds?: Set<string>;
+  onToggleSavedClaim?: (claimId: string) => void;
 }) {
   const [phraseIdx, setPhraseIdx] = useState(0);
 
@@ -756,6 +760,7 @@ function QuickVerifyStatus({
     : isOpinionLatest
       ? "Opinion"
       : statusBadge.label;
+  const isSaved = savedClaimIds?.has(latest.id) ?? false;
 
   return (
     <View style={styles.quickStatusCard}>
@@ -811,9 +816,22 @@ function QuickVerifyStatus({
 
       {!compact && (
         <View style={styles.quickClaimCardActionRow}>
-          <View style={styles.quickClaimCardAction}>
-            <Text style={styles.quickClaimCardActionText}>Save soon</Text>
-          </View>
+          <Pressable
+            onPress={() => onToggleSavedClaim?.(latest.id)}
+            style={[
+              styles.quickClaimCardAction,
+              isSaved && styles.quickClaimCardActionSaved,
+            ]}
+          >
+            <Text
+              style={[
+                styles.quickClaimCardActionText,
+                isSaved && styles.quickClaimCardActionTextSaved,
+              ]}
+            >
+              {isSaved ? "Saved" : "Save card"}
+            </Text>
+          </Pressable>
           <View style={styles.quickClaimCardAction}>
             <Text style={styles.quickClaimCardActionText}>Share soon</Text>
           </View>
@@ -1005,6 +1023,7 @@ export default function ClashBotSheet({
     challengeResolved?: boolean;
   } | null>(null);
   const [now, setNow] = useState(Date.now());
+  const [savedClaimIds, setSavedClaimIds] = useState<Set<string>>(() => new Set());
   const inputRef = useRef<TextInput | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const momentumTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1484,6 +1503,18 @@ export default function ClashBotSheet({
 
   function handleChallengeClaim(claim: ClaimItem) {
     onChallengeClaim?.(claim.id);
+  }
+
+  function toggleSavedClaim(claimId: string) {
+    setSavedClaimIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(claimId)) {
+        next.delete(claimId);
+      } else {
+        next.add(claimId);
+      }
+      return next;
+    });
   }
 
   function renderClaimCard(claim: ClaimItem, options?: { nested?: boolean }) {
@@ -2171,6 +2202,8 @@ export default function ClashBotSheet({
               <QuickVerifyStatus
                 claims={sortedClaims}
                 quickVerifyTarget={quickVerifyTarget}
+                savedClaimIds={savedClaimIds}
+                onToggleSavedClaim={toggleSavedClaim}
               />
             </ScrollView>
           )}
@@ -2577,10 +2610,19 @@ const styles = StyleSheet.create({
     borderColor: "rgba(15, 23, 42, 0.08)",
   },
 
+  quickClaimCardActionSaved: {
+    backgroundColor: "rgba(36, 230, 184, 0.16)",
+    borderColor: "rgba(36, 230, 184, 0.34)",
+  },
+
   quickClaimCardActionText: {
     fontSize: 11,
     fontWeight: "900",
     color: "rgba(15, 23, 42, 0.46)",
+  },
+
+  quickClaimCardActionTextSaved: {
+    color: "#0d3b4a",
   },
 
   quickEvidenceWrap: {
