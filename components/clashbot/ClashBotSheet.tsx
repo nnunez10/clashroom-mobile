@@ -237,6 +237,17 @@ function getResultTypeLabel(
   return null;
 }
 
+function formatSavedAgo(savedAt: number): string {
+  const seconds = Math.floor((Date.now() - savedAt) / 1000);
+  if (seconds < 60) return "Saved just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `Saved ${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `Saved ${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `Saved ${days}d ago`;
+}
+
 function getVerdictHitTone(hit: string) {
   if (hit === "RIGHT") return styles.verdictHitPositive;
   if (hit === "WRONG") return styles.verdictHitNegative;
@@ -2173,30 +2184,34 @@ export default function ClashBotSheet({
                 </View>
               ) : (
                 savedCards.map((card) => (
-                  <QuickVerifyStatus
-                    key={card.id}
-                    claims={[{
-                      id: card.claimId,
-                      text: card.text,
-                      status: card.status,
-                      isSubjective: card.isSubjective,
-                      completedAt: card.completedAt,
-                      verification: {
-                        stance: card.stance,
-                        displayVerdict: card.displayVerdict,
-                        confidenceLabel: card.confidenceLabel,
-                        resultType: card.resultType,
-                        shortWhyItWon: card.shortWhyItWon,
-                        mode: card.mode,
-                        matches: card.evidenceReps ?? [],
-                        top: card.evidenceReps?.[0],
-                        reasonCode: card.reasonCode,
-                        confidenceTier: card.confidenceTier,
-                      },
-                    }]}
-                    savedClaimIds={savedClaimIdsProp}
-                    onToggleSavedClaim={onToggleSavedClaim}
-                  />
+                  <View key={card.id}>
+                    <QuickVerifyStatus
+                      claims={[{
+                        id: card.claimId,
+                        text: card.text,
+                        status: card.status,
+                        isSubjective: card.isSubjective,
+                        completedAt: card.completedAt,
+                        verification: {
+                          stance: card.stance,
+                          displayVerdict: card.displayVerdict,
+                          confidenceLabel: card.confidenceLabel,
+                          resultType: card.resultType,
+                          shortWhyItWon: card.shortWhyItWon,
+                          mode: card.mode,
+                          matches: card.evidenceReps ?? [],
+                          top: card.evidenceReps?.[0],
+                          reasonCode: card.reasonCode,
+                          confidenceTier: card.confidenceTier,
+                        },
+                      }]}
+                      savedClaimIds={savedClaimIdsProp}
+                      onToggleSavedClaim={onToggleSavedClaim}
+                    />
+                    <Text style={styles.savedCardTimestamp}>
+                      {formatSavedAgo(card.savedAt)}
+                    </Text>
+                  </View>
                 ))
               )}
             </ScrollView>
@@ -2767,6 +2782,15 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.45)",
     textAlign: "center",
     lineHeight: 22,
+  },
+
+  savedCardTimestamp: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "rgba(255,255,255,0.40)",
+    marginTop: 4,
+    marginBottom: 8,
+    paddingHorizontal: 4,
   },
 
   pipButton: {
