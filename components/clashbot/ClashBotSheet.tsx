@@ -248,6 +248,15 @@ function formatSavedAgo(savedAt: number): string {
   return `Saved ${days}d ago`;
 }
 
+function verdictToneToAccent(tone?: string): string {
+  if (tone === "supported")    return "rgba(36,230,184,0.70)";
+  if (tone === "contradicted") return "rgba(255,77,77,0.70)";
+  if (tone === "unclear")      return "rgba(245,166,35,0.70)";
+  if (tone === "subjective")   return "rgba(180,130,255,0.70)";
+  if (tone === "no_match")     return "rgba(34,211,238,0.40)";
+  return "rgba(255,255,255,0.12)";
+}
+
 function getVerdictHitTone(hit: string) {
   if (hit === "RIGHT") return styles.verdictHitPositive;
   if (hit === "WRONG") return styles.verdictHitNegative;
@@ -2184,7 +2193,10 @@ export default function ClashBotSheet({
                 </View>
               ) : (
                 savedCards.map((card) => (
-                  <View key={card.id}>
+                  <View
+                    key={card.id}
+                    style={[styles.savedCardWrapper, { borderLeftColor: verdictToneToAccent(card.displayVerdict?.tone) }]}
+                  >
                     <QuickVerifyStatus
                       claims={[{
                         id: card.claimId,
@@ -2791,6 +2803,13 @@ const styles = StyleSheet.create({
     marginTop: 4,
     marginBottom: 8,
     paddingHorizontal: 4,
+  },
+
+  savedCardWrapper: {
+    borderLeftWidth: 3,
+    borderRadius: 2,
+    marginBottom: 2,
+    paddingLeft: 10,
   },
 
   pipButton: {
