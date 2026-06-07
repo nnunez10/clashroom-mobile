@@ -1,3 +1,4 @@
+import { type SavedClaimCard } from "@/lib/claim/savedCard";
 import {
   buildClaimFamilyViews,
   getFamilyStatusLabel,
@@ -166,7 +167,7 @@ type ClashBotSheetProps = {
   claims: ClaimItem[];
   onSubmitClaim: (text: string) => void;
   onDashboardSubmit?: (text: string) => void;
-  mode?: "dashboard" | "quick_verify";
+  mode?: "dashboard" | "quick_verify" | "saved";
   initialDraft?: string;
   quickVerifyTarget?: string;
   pendingResponse?: boolean;
@@ -177,6 +178,8 @@ type ClashBotSheetProps = {
   onChallengeClaim?: (claimId: string) => void;
   savedClaimIds?: Set<string>;
   onToggleSavedClaim?: (claimId: string) => void;
+  savedCards?: SavedClaimCard[];
+  onOpenSavedCards?: () => void;
 };
 
 function getStatusBadge(
@@ -1006,6 +1009,8 @@ export default function ClashBotSheet({
   onChallengeClaim,
   savedClaimIds: savedClaimIdsProp,
   onToggleSavedClaim,
+  savedCards,
+  onOpenSavedCards,
 }: ClashBotSheetProps) {
   const [draft, setDraft] = useState(initialDraft);
   const [closeEnabled, setCloseEnabled] = useState(false);
@@ -1408,7 +1413,9 @@ export default function ClashBotSheet({
   }
 
   const titleText =
-    mode === "quick_verify" ? "Quick Verify" : "ClashBot Dashboard";
+    mode === "quick_verify" ? "Quick Verify"
+    : mode === "saved"      ? "Saved Cards"
+    : "ClashBot Dashboard";
 
   function handleSubmit() {
     const text = draft.trim();
@@ -1978,7 +1985,7 @@ export default function ClashBotSheet({
           pointerEvents="auto"
           style={[
             styles.sheet,
-            mode === "quick_verify"
+            mode === "quick_verify" || mode === "saved"
               ? styles.sheetQuickVerify
               : styles.sheetDashboard,
           ]}
@@ -2000,6 +2007,13 @@ export default function ClashBotSheet({
             </View>
 
             <View style={styles.headerButtons}>
+              {mode === "dashboard" && !!savedCards?.length && (
+                <Pressable onPress={onOpenSavedCards} style={styles.savedCardsButton}>
+                  <Text style={styles.savedCardsButtonText}>
+                    Saved ({savedCards.length})
+                  </Text>
+                </Pressable>
+              )}
               {Platform.OS === "android" && (
                 <Pressable onPress={enterPiP} disabled={!closeEnabled} style={styles.pipButton}>
                   <Text style={styles.pipButtonText}>⊟</Text>
@@ -2144,7 +2158,51 @@ export default function ClashBotSheet({
               />
             )}
 
-          {mode === "dashboard" ? null : (
+          {mode === "saved" && (
+            <ScrollView
+              style={styles.quickVerifyScroll}
+              contentContainerStyle={styles.quickVerifyScrollContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              {!savedCards?.length ? (
+                <View style={styles.savedEmptyState}>
+                  <Text style={styles.savedEmptyStateText}>
+                    No saved cards yet.{"\n"}Verify a claim and tap Save card.
+                  </Text>
+                </View>
+              ) : (
+                savedCards.map((card) => (
+                  <QuickVerifyStatus
+                    key={card.id}
+                    claims={[{
+                      id: card.claimId,
+                      text: card.text,
+                      status: card.status,
+                      isSubjective: card.isSubjective,
+                      completedAt: card.completedAt,
+                      verification: {
+                        stance: card.stance,
+                        displayVerdict: card.displayVerdict,
+                        confidenceLabel: card.confidenceLabel,
+                        resultType: card.resultType,
+                        shortWhyItWon: card.shortWhyItWon,
+                        mode: card.mode,
+                        matches: card.evidenceReps ?? [],
+                        top: card.evidenceReps?.[0],
+                        reasonCode: card.reasonCode,
+                        confidenceTier: card.confidenceTier,
+                      },
+                    }]}
+                    savedClaimIds={savedClaimIdsProp}
+                    onToggleSavedClaim={onToggleSavedClaim}
+                  />
+                ))
+              )}
+            </ScrollView>
+          )}
+
+          {mode === "quick_verify" && (
             <ScrollView
               style={styles.quickVerifyScroll}
               contentContainerStyle={styles.quickVerifyScrollContent}
@@ -2681,6 +2739,34 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
+  },
+
+  savedCardsButton: {
+    backgroundColor: "rgba(34,211,238,0.10)",
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    marginRight: 6,
+  },
+
+  savedCardsButtonText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#22d3ee",
+  },
+
+  savedEmptyState: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 48,
+    paddingHorizontal: 24,
+  },
+
+  savedEmptyStateText: {
+    fontSize: 15,
+    color: "rgba(255,255,255,0.45)",
+    textAlign: "center",
+    lineHeight: 22,
   },
 
   pipButton: {

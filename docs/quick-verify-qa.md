@@ -76,6 +76,26 @@ Pass:
 - Source rows are readable.
 - Tapping a source opens only when a source URL exists.
 
+## Session-Only Save/Saved ClaimCards
+
+1. Submit a claim through ClashBubble / Verify Anything.
+2. Wait for the Generated ClaimCard to render.
+3. Tap Save card.
+4. Tap Saved again.
+5. Save one claim, then verify or inspect another claim.
+6. Close and reopen the Quick Verify sheet during the same app session.
+7. Restart the app.
+
+Pass:
+- Save card toggles to Saved.
+- Saved toggles back to Save card.
+- Saved state applies only to the selected claim.
+- Saved state survives sheet close/reopen during the same app session.
+- Saved state does not need to persist after app restart yet.
+- Share soon and Challenge soon remain inert placeholders.
+- Evidence receipts remain readable after saving.
+- Subjective/opinion ClaimCards can be saved without credibility side effects.
+
 ## 7. Defend Your Claim Flow
 
 1. Trigger a challenged claim.

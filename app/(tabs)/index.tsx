@@ -17,8 +17,9 @@ import ClashBotSheet from "../../components/clashbot/ClashBotSheet";
 import ClashBotWidget from "../../components/clashbot/ClashBotWidget";
 import { isSubjectiveClaim } from "../../lib/clashbot/subjectiveClash";
 import { useMockClashBotEngine } from "../../lib/clashbot/useMockClashBotEngine";
+import { type SavedClaimCard, snapshotSavedCard } from "../../lib/claim/savedCard";
 
-type SheetMode = "dashboard" | "quick_verify";
+type SheetMode = "dashboard" | "quick_verify" | "saved";
 type WidgetTone = "unverified" | "checking" | "verified" | "disputed";
 
 const COLORS = {
@@ -114,17 +115,19 @@ export default function HomeScreen() {
   const quickInputRef = useRef<TextInput | null>(null);
   const lastSubmitAtRef = useRef(0);
   const [savedClaimIds, setSavedClaimIds] = useState<Set<string>>(() => new Set());
+  const [savedCards, setSavedCards] = useState<SavedClaimCard[]>([]);
 
   function toggleSavedClaim(claimId: string) {
-    setSavedClaimIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(claimId)) {
-        next.delete(claimId);
-      } else {
-        next.add(claimId);
+    if (savedClaimIds.has(claimId)) {
+      setSavedClaimIds((prev) => { const n = new Set(prev); n.delete(claimId); return n; });
+      setSavedCards((prev) => prev.filter((c) => c.claimId !== claimId));
+    } else {
+      const source = claims.find((c) => c.id === claimId);
+      if (source) {
+        setSavedCards((prev) => [snapshotSavedCard(source as any), ...prev]);
       }
-      return next;
-    });
+      setSavedClaimIds((prev) => new Set(prev).add(claimId));
+    }
   }
   const isListeningShared = useSharedValue(false);
 
@@ -416,6 +419,11 @@ export default function HomeScreen() {
     setSheetOpen(true);
   }
 
+  function openSavedCards() {
+    setSheetMode("saved");
+    setSheetOpen(true);
+  }
+
   function openQuickVerify(seedText?: string) {
     Keyboard.dismiss();
     if (seedText) {
@@ -669,6 +677,8 @@ export default function HomeScreen() {
           onChallengeClaim={handleChallengeClaim}
           savedClaimIds={savedClaimIds}
           onToggleSavedClaim={toggleSavedClaim}
+          savedCards={savedCards}
+          onOpenSavedCards={openSavedCards}
         />
 
         {!sheetOpen && (
