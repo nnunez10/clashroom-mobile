@@ -1,4 +1,5 @@
 import { type SavedClaimCard } from "@/lib/claim/savedCard";
+import ClaimCardDetail from "./ClaimCardDetail";
 import {
   buildClaimFamilyViews,
   getFamilyStatusLabel,
@@ -1066,6 +1067,7 @@ export default function ClashBotSheet({
   const [overlayReaction, setOverlayReaction] = useState("");
   const [overlayClaimText, setOverlayClaimText] = useState("");
   const shownOverlayClaimIdRef = useRef<string | null>(null);
+  const [detailCard, setDetailCard] = useState<SavedClaimCard | null>(null);
 
   const prevIsOpenRef = useRef(false);
 
@@ -2193,37 +2195,41 @@ export default function ClashBotSheet({
                 </View>
               ) : (
                 savedCards.map((card) => (
-                  <View
+                  <Pressable
                     key={card.id}
-                    style={[styles.savedCardWrapper, { borderLeftColor: verdictToneToAccent(card.displayVerdict?.tone) }]}
+                    onPress={() => setDetailCard(card)}
                   >
-                    <QuickVerifyStatus
-                      claims={[{
-                        id: card.claimId,
-                        text: card.text,
-                        status: card.status,
-                        isSubjective: card.isSubjective,
-                        completedAt: card.completedAt,
-                        verification: {
-                          stance: card.stance,
-                          displayVerdict: card.displayVerdict,
-                          confidenceLabel: card.confidenceLabel,
-                          resultType: card.resultType,
-                          shortWhyItWon: card.shortWhyItWon,
-                          mode: card.mode,
-                          matches: card.evidenceReps ?? [],
-                          top: card.evidenceReps?.[0],
-                          reasonCode: card.reasonCode,
-                          confidenceTier: card.confidenceTier,
-                        },
-                      }]}
-                      savedClaimIds={savedClaimIdsProp}
-                      onToggleSavedClaim={onToggleSavedClaim}
-                    />
-                    <Text style={styles.savedCardTimestamp}>
-                      {formatSavedAgo(card.savedAt)}
-                    </Text>
-                  </View>
+                    <View
+                      style={[styles.savedCardWrapper, { borderLeftColor: verdictToneToAccent(card.displayVerdict?.tone) }]}
+                    >
+                      <QuickVerifyStatus
+                        claims={[{
+                          id: card.claimId,
+                          text: card.text,
+                          status: card.status,
+                          isSubjective: card.isSubjective,
+                          completedAt: card.completedAt,
+                          verification: {
+                            stance: card.stance,
+                            displayVerdict: card.displayVerdict,
+                            confidenceLabel: card.confidenceLabel,
+                            resultType: card.resultType,
+                            shortWhyItWon: card.shortWhyItWon,
+                            mode: card.mode,
+                            matches: card.evidenceReps ?? [],
+                            top: card.evidenceReps?.[0],
+                            reasonCode: card.reasonCode,
+                            confidenceTier: card.confidenceTier,
+                          },
+                        }]}
+                        savedClaimIds={savedClaimIdsProp}
+                        onToggleSavedClaim={onToggleSavedClaim}
+                      />
+                      <Text style={styles.savedCardTimestamp}>
+                        {formatSavedAgo(card.savedAt)}
+                      </Text>
+                    </View>
+                  </Pressable>
                 ))
               )}
             </ScrollView>
@@ -2557,6 +2563,11 @@ export default function ClashBotSheet({
               </Text>
             </View>
           )}
+
+          <ClaimCardDetail
+            card={mode === "saved" ? detailCard : null}
+            onClose={() => setDetailCard(null)}
+          />
         </View>
       </KeyboardAvoidingView>
     </View>
