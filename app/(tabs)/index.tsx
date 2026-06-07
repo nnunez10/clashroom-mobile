@@ -18,6 +18,7 @@ import ClashBotWidget from "../../components/clashbot/ClashBotWidget";
 import { isSubjectiveClaim } from "../../lib/clashbot/subjectiveClash";
 import { useMockClashBotEngine } from "../../lib/clashbot/useMockClashBotEngine";
 import { type SavedClaimCard, snapshotSavedCard } from "../../lib/claim/savedCard";
+import { loadSavedCards, persistSavedCards } from "../../lib/claim/savedCardStorage";
 
 type SheetMode = "dashboard" | "quick_verify" | "saved";
 type WidgetTone = "unverified" | "checking" | "verified" | "disputed";
@@ -114,6 +115,7 @@ export default function HomeScreen() {
   const speechEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const quickInputRef = useRef<TextInput | null>(null);
   const lastSubmitAtRef = useRef(0);
+  const hasLoadedFromStorageRef = useRef(false);
   const [savedClaimIds, setSavedClaimIds] = useState<Set<string>>(() => new Set());
   const [savedCards, setSavedCards] = useState<SavedClaimCard[]>([]);
 
@@ -307,6 +309,19 @@ export default function HomeScreen() {
       ExpoSpeechRecognitionModule.abort();
     };
   }, []);
+
+  useEffect(() => {
+    loadSavedCards().then((cards) => {
+      hasLoadedFromStorageRef.current = true;
+      setSavedCards(cards);
+      setSavedClaimIds(new Set(cards.map((c) => c.claimId)));
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoadedFromStorageRef.current) return;
+    persistSavedCards(savedCards);
+  }, [savedCards]);
 
   const checkingClaim = useMemo(
     () => claims.find((c) => c.status === "checking") || null,
