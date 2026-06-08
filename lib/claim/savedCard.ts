@@ -62,6 +62,10 @@ export type SavedClaimCard = {
   completedAt?: number;
   reasonCode?: string;
   confidenceTier?: string;
+
+  // Relationship fields — snapshotted at save time for future relationship UI
+  familyId?: string;
+  derivedFromClaimId?: string | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -74,6 +78,9 @@ type SnapshotInput = {
   status?: string;
   isSubjective?: boolean;
   completedAt?: number;
+  familyId?: string;
+  derivedFromClaimId?: string | null;
+  claimDna?: { familyId?: string };
   verification?: {
     stance?: string;
     displayVerdict?: { tone: string; label: string; sublabel: string };
@@ -141,5 +148,7 @@ export function snapshotSavedCard(claim: SnapshotInput): SavedClaimCard {
     completedAt: claim.completedAt,
     reasonCode: v?.reasonCode,
     confidenceTier: v?.confidenceTier,
+    familyId: claim.familyId ?? claim.claimDna?.familyId,
+    derivedFromClaimId: claim.derivedFromClaimId,
   };
 }
