@@ -4,8 +4,11 @@
 // Converts raw text into a SavedClaimCard via the verification pipeline,
 // with no React dependency and no engine state.
 //
-// Step 1 skeleton: types + status helper + unimplemented stub.
+// Step 2: normalize input, compute ClaimDNA, create claimId.
 
+import { getClaimDna } from "@/lib/clashbot/claimDna";
+import { normalizeClaimInput } from "@/lib/clashbot/normalizeInput";
+import { makeId } from "@/lib/clashbot/verificationService";
 import type { SavedClaimCard } from "./savedCard";
 
 // ---------------------------------------------------------------------------
@@ -48,7 +51,17 @@ void resolveSavedClaimStatus;
 // ---------------------------------------------------------------------------
 
 export async function buildClaimCardFromText(
-  _input: BuildClaimCardFromTextInput,
+  input: BuildClaimCardFromTextInput,
 ): Promise<ClaimCardResult> {
-  throw new Error("buildClaimCardFromText is not implemented yet");
+  const { raw, normalized } = normalizeClaimInput(input.text);
+  if (!raw) throw new Error("buildClaimCardFromText: empty claim text");
+
+  const claimText = normalized || raw;
+  const claimId = makeId("claim", `${claimText}_${Date.now()}`);
+  const dna = getClaimDna(claimText);
+
+  // Steps 3–6 (verification, snapshot, return) not yet implemented.
+  void claimId;
+  void dna;
+  throw new Error("buildClaimCardFromText is not fully implemented yet");
 }
