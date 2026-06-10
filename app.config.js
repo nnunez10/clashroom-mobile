@@ -95,9 +95,6 @@ module.exports = ({ config }) => {
    */
   const appEnv = env("APP_ENV", "development");
 
-  // [DEBUG] Remove before shipping.
-  console.log("[app.config.js] SERPAPI_KEY in config:", env("SERPAPI_KEY") ? "present (" + env("SERPAPI_KEY").slice(0,6) + "...)" : "MISSING");
-
   config.extra = {
     ...(config.extra || {}),
 
