@@ -4,11 +4,13 @@
 // Converts raw text into a SavedClaimCard via the verification pipeline,
 // with no React dependency and no engine state.
 //
-// Step 2: normalize input, compute ClaimDNA, create claimId.
+// Step 3: known-fact override path.
 
 import { getClaimDna } from "@/lib/clashbot/claimDna";
+import { findKnownFactOverride } from "@/lib/clashbot/knownFacts";
 import { normalizeClaimInput } from "@/lib/clashbot/normalizeInput";
-import { makeId } from "@/lib/clashbot/verificationService";
+import { buildOverrideVerification, makeId } from "@/lib/clashbot/verificationService";
+import { snapshotSavedCard } from "./savedCard";
 import type { SavedClaimCard } from "./savedCard";
 
 // ---------------------------------------------------------------------------
@@ -43,9 +45,6 @@ function resolveSavedClaimStatus(
   return "disputed";
 }
 
-// Suppress unused-variable warning until Step 2 wires the helper in.
-void resolveSavedClaimStatus;
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -60,8 +59,27 @@ export async function buildClaimCardFromText(
   const claimId = makeId("claim", `${claimText}_${Date.now()}`);
   const dna = getClaimDna(claimText);
 
-  // Steps 3–6 (verification, snapshot, return) not yet implemented.
-  void claimId;
-  void dna;
+  // --- Known-fact override path ---
+  const override = findKnownFactOverride(claimText);
+  if (override) {
+    const overrideVerification = buildOverrideVerification(override);
+    if (!overrideVerification) throw new Error("buildOverrideVerification returned null unexpectedly");
+
+    const status = resolveSavedClaimStatus("matched", overrideVerification.stance, true);
+
+    const card = snapshotSavedCard({
+      id: claimId,
+      text: raw,
+      status,
+      completedAt: Date.now(),
+      familyId: dna.familyId,
+      derivedFromClaimId: input.derivedFromClaimId ?? null,
+      verification: overrideVerification,
+    });
+
+    return { card, familyId: dna.familyId, fingerprint: dna.fingerprint };
+  }
+
+  // Steps 4–6 (subjective path, API verification, return) not yet implemented.
   throw new Error("buildClaimCardFromText is not fully implemented yet");
 }
