@@ -19,6 +19,7 @@ import { isSubjectiveClaim } from "../../lib/clashbot/subjectiveClash";
 import { useMockClashBotEngine } from "../../lib/clashbot/useMockClashBotEngine";
 import { type SavedClaimCard, snapshotSavedCard } from "../../lib/claim/savedCard";
 import { loadSavedCards, persistSavedCards } from "../../lib/claim/savedCardStorage";
+import { createClaimGraph } from "../../lib/claim/claimGraph";
 
 type SheetMode = "dashboard" | "quick_verify" | "saved";
 type WidgetTone = "unverified" | "checking" | "verified" | "disputed";
@@ -116,6 +117,7 @@ export default function HomeScreen() {
   const quickInputRef = useRef<TextInput | null>(null);
   const lastSubmitAtRef = useRef(0);
   const hasLoadedFromStorageRef = useRef(false);
+  const graphRef = useRef(createClaimGraph());
   const [savedClaimIds, setSavedClaimIds] = useState<Set<string>>(() => new Set());
   const [savedCards, setSavedCards] = useState<SavedClaimCard[]>([]);
 
@@ -123,10 +125,13 @@ export default function HomeScreen() {
     if (savedClaimIds.has(claimId)) {
       setSavedClaimIds((prev) => { const n = new Set(prev); n.delete(claimId); return n; });
       setSavedCards((prev) => prev.filter((c) => c.claimId !== claimId));
+      graphRef.current.removeNode(claimId);
     } else {
       const source = claims.find((c) => c.id === claimId);
       if (source) {
-        setSavedCards((prev) => [snapshotSavedCard(source as any), ...prev]);
+        const snapshot = snapshotSavedCard(source as any);
+        setSavedCards((prev) => [snapshot, ...prev]);
+        graphRef.current.addNode(snapshot);
       }
       setSavedClaimIds((prev) => new Set(prev).add(claimId));
     }
@@ -312,6 +317,7 @@ export default function HomeScreen() {
 
   useEffect(() => {
     loadSavedCards().then((cards) => {
+      graphRef.current.hydrate(cards);
       hasLoadedFromStorageRef.current = true;
       setSavedCards(cards);
       setSavedClaimIds(new Set(cards.map((c) => c.claimId)));
