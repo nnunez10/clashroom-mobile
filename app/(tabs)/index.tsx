@@ -700,6 +700,7 @@ export default function HomeScreen() {
           onToggleSavedClaim={toggleSavedClaim}
           savedCards={savedCards}
           onOpenSavedCards={openSavedCards}
+          graph={graphRef.current}
         />
 
         {!sheetOpen && (

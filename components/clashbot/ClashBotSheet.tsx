@@ -1,4 +1,5 @@
 import { type SavedClaimCard } from "@/lib/claim/savedCard";
+import { type ClaimGraph } from "@/lib/claim/claimGraph";
 import ClaimCardDetail from "./ClaimCardDetail";
 import {
   buildClaimFamilyViews,
@@ -181,6 +182,7 @@ type ClashBotSheetProps = {
   onToggleSavedClaim?: (claimId: string) => void;
   savedCards?: SavedClaimCard[];
   onOpenSavedCards?: () => void;
+  graph?: ClaimGraph;
 };
 
 function getStatusBadge(
@@ -1032,6 +1034,7 @@ export default function ClashBotSheet({
   onToggleSavedClaim,
   savedCards,
   onOpenSavedCards,
+  graph,
 }: ClashBotSheetProps) {
   const [draft, setDraft] = useState(initialDraft);
   const [closeEnabled, setCloseEnabled] = useState(false);
@@ -2228,6 +2231,11 @@ export default function ClashBotSheet({
                       <Text style={styles.savedCardTimestamp}>
                         {formatSavedAgo(card.savedAt)}
                       </Text>
+                      {card.familyId && graph && graph.getFamily(card.familyId).length >= 2 && (
+                        <Text style={styles.savedCardFamilyCount}>
+                          {graph.getFamily(card.familyId).length} saved in this claim family
+                        </Text>
+                      )}
                     </View>
                   </Pressable>
                 ))
@@ -2812,6 +2820,15 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: "rgba(255,255,255,0.40)",
     marginTop: 4,
+    marginBottom: 8,
+    paddingHorizontal: 4,
+  },
+
+  savedCardFamilyCount: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: "rgba(255,255,255,0.28)",
+    marginTop: 0,
     marginBottom: 8,
     paddingHorizontal: 4,
   },
