@@ -86,6 +86,7 @@ module.exports = ({ config }) => {
           "Allow ClashRoom to turn speech into claim drafts.",
       },
     ],
+    "expo-router",
   ];
 
   /**
