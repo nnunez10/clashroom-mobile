@@ -247,7 +247,7 @@ export default function HomeScreen() {
   useSpeechRecognitionEvent("result", (event) => {
     const text = event.results?.[0]?.transcript?.trim();
     console.log("[PushToClaim] result", text, "final:", event.isFinal);
-    if (text) speechTextRef.current = text;
+    if (text && speechActiveRef.current) speechTextRef.current = text;
     if (event.isFinal && speechActiveRef.current) commitSpeechDraft();
   });
 
