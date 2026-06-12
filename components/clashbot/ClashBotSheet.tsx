@@ -2045,15 +2045,15 @@ export default function ClashBotSheet({
                 </Pressable>
               )}
               <Pressable
-                onPress={() => { if (!isBlockingClash) onClose(); }}
-                style={[styles.closeButton, isBlockingClash && { opacity: 0.4 }]}
+                onPress={() => { if (!isBlockingClash || mode !== "dashboard") onClose(); }}
+                style={[styles.closeButton, isBlockingClash && mode === "dashboard" && { opacity: 0.4 }]}
               >
                 <Text style={styles.closeButtonText}>Close</Text>
               </Pressable>
             </View>
           </View>
 
-          {pendingResponse && (
+          {pendingResponse && mode === "dashboard" && (
             <View style={[styles.pendingResponseBadge, escalationLevel >= 2 && styles.pendingResponseBadgeEscalated]}>
               <Text style={[styles.pendingResponseBadgeText, escalationLevel >= 2 && styles.pendingResponseBadgeTextEscalated]}>
                 {clashLost
@@ -2250,46 +2250,6 @@ export default function ClashBotSheet({
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}
             >
-              {!!defenseClaim && pendingResponse && (
-                <View
-                  style={[
-                    styles.defenseFocusCard,
-                    isDefenseMode && styles.defenseFocusCardActive,
-                  ]}
-                >
-                  <View style={styles.defenseFocusTopRow}>
-                    <Text style={styles.defenseFocusLabel}>
-                      {isDefenseMode ? "DEFENDING CLAIM" : "UNDER CHALLENGE"}
-                    </Text>
-                    {!!defenseTimeLeft && (
-                      <Text style={styles.defenseFocusCountdown}>
-                        {defenseTimeLeft} left
-                      </Text>
-                    )}
-                  </View>
-
-                  {!!defenseChallengerName && (
-                    <Text style={styles.defenseFocusLine}>
-                      {defenseChallengerName} challenged this claim
-                    </Text>
-                  )}
-
-                  <Text style={styles.defenseFocusClaim} numberOfLines={3}>
-                    {defenseClaim.text}
-                  </Text>
-
-                  {!isDefenseMode && (
-                    <Pressable
-                      onPress={() => handleDefendClaim(defenseClaim)}
-                      style={styles.defenseFocusButton}
-                    >
-                      <Text style={styles.defenseFocusButtonText}>
-                        Defend your claim
-                      </Text>
-                    </Pressable>
-                  )}
-                </View>
-              )}
               <QuickVerifyStatus
                 claims={sortedClaims}
                 quickVerifyTarget={quickVerifyTarget}
