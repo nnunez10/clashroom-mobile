@@ -114,6 +114,7 @@ export default function HomeScreen() {
   const speechActiveRef = useRef(false);
   const speechSessionRef = useRef(0);
   const speechEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const speechCommitPendingRef = useRef(false);
   const quickInputRef = useRef<TextInput | null>(null);
   const lastSubmitAtRef = useRef(0);
   const hasLoadedFromStorageRef = useRef(false);
@@ -196,6 +197,7 @@ export default function HomeScreen() {
 
   function commitSpeechDraft() {
     clearSpeechEndTimer();
+    speechCommitPendingRef.current = false;
     speechActiveRef.current = false;
     setIsListeningForClaim(false);
 
@@ -229,6 +231,7 @@ export default function HomeScreen() {
     clearSpeechEndTimer();
     speechTextRef.current = "";
     speechActiveRef.current = true;
+    speechCommitPendingRef.current = true;
     setIsListeningForClaim(true);
     setVoiceHint("Listening... release to draft.");
     ExpoSpeechRecognitionModule.start({ lang: "en-US", interimResults: true });
@@ -247,7 +250,7 @@ export default function HomeScreen() {
   useSpeechRecognitionEvent("result", (event) => {
     const text = event.results?.[0]?.transcript?.trim();
     console.log("[PushToClaim] result", text, "final:", event.isFinal);
-    if (text && speechActiveRef.current) speechTextRef.current = text;
+    if (text && speechCommitPendingRef.current) speechTextRef.current = text;
     if (event.isFinal && speechActiveRef.current) commitSpeechDraft();
   });
 
