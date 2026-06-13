@@ -784,7 +784,7 @@ function QuickVerifyStatus({
     ? getVerdictTextStyleByTone(qvTone, isOpinionLatest)
     : undefined;
   const qvStatusLabel = latest.pendingResponse
-    ? "Under Challenge"
+    ? "Needs Review"
     : isOpinionLatest
       ? "Opinion"
       : statusBadge.label;
