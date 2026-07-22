@@ -183,6 +183,10 @@ type ClashBotSheetProps = {
   savedCards?: SavedClaimCard[];
   onOpenSavedCards?: () => void;
   graph?: ClaimGraph;
+  speechConfirmDraft?: string;
+  onSpeechConfirm?: (text: string) => void;
+  onSpeechEdit?: (text: string) => void;
+  onSpeechRetry?: () => void;
 };
 
 function getStatusBadge(
@@ -1035,6 +1039,10 @@ export default function ClashBotSheet({
   savedCards,
   onOpenSavedCards,
   graph,
+  speechConfirmDraft,
+  onSpeechConfirm,
+  onSpeechEdit,
+  onSpeechRetry,
 }: ClashBotSheetProps) {
   const [draft, setDraft] = useState(initialDraft);
   const [closeEnabled, setCloseEnabled] = useState(false);
@@ -2250,6 +2258,32 @@ export default function ClashBotSheet({
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}
             >
+              {!!speechConfirmDraft && (
+                <View style={styles.speechConfirmBlock}>
+                  <Text style={styles.speechConfirmLabel}>I heard:</Text>
+                  <Text style={styles.speechConfirmText}>{speechConfirmDraft}</Text>
+                  <View style={styles.speechConfirmRow}>
+                    <Pressable
+                      style={[styles.speechConfirmBtn, styles.speechConfirmBtnPrimary]}
+                      onPress={() => onSpeechConfirm?.(speechConfirmDraft)}
+                    >
+                      <Text style={styles.speechConfirmBtnPrimaryText}>Verify Claim</Text>
+                    </Pressable>
+                    <Pressable
+                      style={styles.speechConfirmBtn}
+                      onPress={() => onSpeechEdit?.(speechConfirmDraft)}
+                    >
+                      <Text style={styles.speechConfirmBtnText}>Edit Text</Text>
+                    </Pressable>
+                    <Pressable
+                      style={styles.speechConfirmBtn}
+                      onPress={onSpeechRetry}
+                    >
+                      <Text style={styles.speechConfirmBtnText}>Try Again</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              )}
               <QuickVerifyStatus
                 claims={sortedClaims}
                 quickVerifyTarget={quickVerifyTarget}
@@ -3973,5 +4007,62 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
     color: "rgba(15, 23, 42, 0.60)",
+  },
+
+  speechConfirmBlock: {
+    backgroundColor: "rgba(34,211,238,0.07)",
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(34,211,238,0.25)",
+    padding: 16,
+    marginBottom: 16,
+  },
+
+  speechConfirmLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "rgba(34,211,238,0.70)",
+    letterSpacing: 1,
+    textTransform: "uppercase",
+    marginBottom: 6,
+  },
+
+  speechConfirmText: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#e2e8f0",
+    lineHeight: 21,
+    marginBottom: 14,
+  },
+
+  speechConfirmRow: {
+    flexDirection: "row",
+    gap: 8,
+  },
+
+  speechConfirmBtn: {
+    flex: 1,
+    paddingVertical: 9,
+    borderRadius: 9,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(34,211,238,0.25)",
+    alignItems: "center",
+  },
+
+  speechConfirmBtnPrimary: {
+    backgroundColor: "rgba(34,211,238,0.12)",
+    borderColor: "rgba(34,211,238,0.45)",
+  },
+
+  speechConfirmBtnPrimaryText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "rgba(34,211,238,0.95)",
+  },
+
+  speechConfirmBtnText: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "rgba(203,213,225,0.80)",
   },
 });

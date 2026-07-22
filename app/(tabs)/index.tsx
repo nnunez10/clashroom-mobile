@@ -106,6 +106,7 @@ export default function HomeScreen() {
   const [sheetMode, setSheetMode] = useState<SheetMode>("dashboard");
   const [quickDraft, setQuickDraft] = useState("");
   const [pendingQuickClaim, setPendingQuickClaim] = useState("");
+  const [speechConfirmDraft, setSpeechConfirmDraft] = useState("");
   const [pendingResponse, setPendingResponse] = useState(false);
   const [isListeningForClaim, setIsListeningForClaim] = useState(false);
   const [voiceHint, setVoiceHint] = useState("PRESS + HOLD TO TALK");
@@ -219,9 +220,28 @@ export default function HomeScreen() {
       return;
     }
 
-    setVoiceHint("Verifying...");
-    handleDirectSubmit(next);
-    openQuickVerify(next);
+    setSpeechConfirmDraft(next);
+    setVoiceHint("Confirm or edit what you said.");
+    openQuickVerify();
+  }
+
+  function handleSpeechConfirm(text: string) {
+    setSpeechConfirmDraft("");
+    setPendingQuickClaim(text);
+    handleDirectSubmit(text);
+  }
+
+  function handleSpeechEdit(text: string) {
+    setSpeechConfirmDraft("");
+    setQuickDraft(text);
+    closeSheet();
+  }
+
+  function handleSpeechRetry() {
+    setSpeechConfirmDraft("");
+    setQuickDraft("");
+    closeSheet();
+    setVoiceHint("PRESS + HOLD TO TALK");
   }
 
   function startPushToClaim() {
@@ -691,8 +711,8 @@ export default function HomeScreen() {
             }
           }}
           mode={sheetMode}
-          initialDraft={sheetMode === "quick_verify" ? pendingQuickClaim : ""}
-          quickVerifyTarget={sheetMode === "quick_verify" ? pendingQuickClaim : undefined}
+          initialDraft={sheetMode === "quick_verify" ? (speechConfirmDraft || pendingQuickClaim) : ""}
+          quickVerifyTarget={sheetMode === "quick_verify" && !speechConfirmDraft ? pendingQuickClaim : undefined}
           pendingResponse={pendingResponse}
           onPendingResolved={handlePendingResolved}
           onStartPending={() => setPendingResponse(true)}
@@ -704,6 +724,10 @@ export default function HomeScreen() {
           savedCards={savedCards}
           onOpenSavedCards={openSavedCards}
           graph={graphRef.current}
+          speechConfirmDraft={speechConfirmDraft}
+          onSpeechConfirm={handleSpeechConfirm}
+          onSpeechEdit={handleSpeechEdit}
+          onSpeechRetry={handleSpeechRetry}
         />
 
         {!sheetOpen && (
